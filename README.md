@@ -8,6 +8,7 @@
 
 Crux is a free, open-source menu-bar assistant that reads your mail **100% on-device**, tells you the few things that genuinely need you, drafts your replies, and quiets the rest. No account. No cloud. No telemetry. Your email never leaves your Mac.
 
+[![Build](https://github.com/Tharuntejandhe/Crux/actions/workflows/swift.yml/badge.svg)](https://github.com/Tharuntejandhe/Crux/actions/workflows/swift.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c1c3.svg)](LICENSE)
 ![Platform](https://img.shields.io/badge/macOS-26%2B-black)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-required-black)
