@@ -1,0 +1,17 @@
+# Build artifacts
+.build/
+.swiftpm/
+*.xcuserstate
+
+# Distributable (attach to GitHub Releases instead of committing)
+dist/
+
+# Local backups / scratch
+.bak-crashfix/
+*.bak
+
+# Screen recordings / scratch media
+*.mov
+
+# macOS
+.DS_Store
