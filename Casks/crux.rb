@@ -9,7 +9,7 @@
 #   shasum -a 256 dist/Crux.zip).  Replace OWNER with your GitHub username.
 cask "crux" do
   version "0.1.0"
-  sha256 "cc15ff30b6553e3850a8db178b11e3e4b10f723cd51895440d8e44b6dc2c31cd"
+  sha256 "08911dcaa64f9255cd9546ea8331accaafbec9d6f616b1d6de12257145f4ff60"
 
   url "https://github.com/Tharuntejandhe/Crux/releases/download/v#{version}/Crux.zip"
   name "Crux"
