@@ -13,8 +13,15 @@ public final class UpdateChecker {
     private init() {}
 
     /// ⚠️ Set this to your public repo ("owner/Novex") before release. While it's
-    /// the placeholder, the checker no-ops (no network) so dev builds never call out.
-    static let repo = "Tharuntejandhe/Novex"
+    /// still `unconfiguredRepo`, the checker no-ops (no network) so dev builds
+    /// never call out.
+    nonisolated static let repo = "Tharuntejandhe/Novex"
+
+    /// The "not configured yet" sentinel. The checker no-ops while `repo` still
+    /// equals this. It must DIFFER from `repo` once a real repo is set — otherwise
+    /// the guard in `fetch()` permanently disables update checks. (Regression
+    /// guarded by a test.)
+    nonisolated static let unconfiguredRepo = "OWNER/Novex"
 
     public struct Update: Equatable, Sendable {
         public let version: String   // e.g. "v1.2.0"
@@ -47,7 +54,7 @@ public final class UpdateChecker {
     }
 
     private func fetch() async {
-        guard Self.repo != "Tharuntejandhe/Novex",
+        guard Self.repo != Self.unconfiguredRepo,
               let url = URL(string: "https://api.github.com/repos/\(Self.repo)/releases/latest")
         else { return }
         var req = URLRequest(url: url, timeoutInterval: 8)
@@ -69,7 +76,8 @@ public final class UpdateChecker {
     }
 
     /// Numeric, component-wise version compare (tolerant of a leading "v").
-    static func isNewer(_ tag: String, than current: String) -> Bool {
+    /// Pure — no actor state — so it stays `nonisolated` for easy testing.
+    nonisolated static func isNewer(_ tag: String, than current: String) -> Bool {
         func parts(_ s: String) -> [Int] {
             s.drop(while: { !$0.isNumber }).split(separator: ".").map { Int($0) ?? 0 }
         }

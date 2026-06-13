@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:desktop-agent}",
+            "name": "Debug NovexDevTests",
+            "target": "NovexDevTests",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug NovexDevTests"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:desktop-agent}",
+            "name": "Release NovexDevTests",
+            "target": "NovexDevTests",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release NovexDevTests"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:desktop-agent}",
+            "name": "Debug Novex",
+            "target": "Novex",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Novex"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:desktop-agent}",
+            "name": "Release Novex",
+            "target": "Novex",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Novex"
+        }
+    ]
+}

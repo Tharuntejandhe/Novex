@@ -55,10 +55,16 @@ public final class NotchController {
         container.addSubview(host)
         panel.contentView = container
         self.container = container
-        updateActiveRect()
-        panel.orderFrontRegardless()
+        // Assign `self.panel` BEFORE updateActiveRect(): that method toggles
+        // `self.panel?.ignoresMouseEvents`, so if the panel isn't stored yet the
+        // toggle is a silent no-op and the panel keeps its creation-time value
+        // (ignoresMouseEvents = false) — swallowing every click in the top-center
+        // region until the first peek fires. (Bug: dead click-zone under the notch.)
         self.panel = panel
         observePeek()
+        // peek == nil at launch → updateActiveRect keeps the window OFF screen
+        // until a real card arrives (so it never blocks clicks while idle).
+        updateActiveRect()
     }
 
     /// Only the visible peek claims clicks; everything else passes through so the
@@ -70,16 +76,23 @@ public final class NotchController {
     }
 
     private func updateActiveRect() {
-        guard let c = container else { return }
-        // CRITICAL: the window only intercepts clicks while a peek is live.
-        // No peek → fully click-through (never blocks the apps beneath it).
-        panel?.ignoresMouseEvents = (model.peek == nil)
+        guard let c = container, let panel else { return }
         if model.peek != nil {
+            // A card is on screen → make the window interactive + visible.
+            panel.ignoresMouseEvents = false
             let w = panelSize.width, h = panelSize.height
             let cw = PeekLayout.cardWidth, ch = PeekLayout.cardHeight
             c.activeRect = CGRect(x: (w - cw) / 2, y: h - topGap - ch, width: cw, height: ch)
+            panel.orderFrontRegardless()
         } else {
+            // No card → take the window OFF screen entirely so it can NEVER
+            // intercept a click in the top-center region. This is the bulletproof
+            // fix for the recurring "dead click-zone under the notch" bug:
+            // ignoresMouseEvents alone has failed in edge cases, but an
+            // ordered-out window is physically incapable of catching a click.
             c.activeRect = .zero
+            panel.ignoresMouseEvents = true
+            panel.orderOut(nil)
         }
     }
 

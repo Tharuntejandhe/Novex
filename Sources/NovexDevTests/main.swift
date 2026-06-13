@@ -719,6 +719,24 @@ group("prompt-injection sanitize") {
           "leaves normal mail untouched")
 }
 
+group("update checker — configured & version compare") {
+    // Regression guard: the Crux→Novex rename once collapsed `repo` and the
+    // "unconfigured" sentinel into the same string, so `fetch()`'s
+    // `repo != unconfiguredRepo` guard was always false and the update check
+    // NEVER ran (users would silently miss every future release, incl. security
+    // fixes). If these two are ever equal again, updates are dead.
+    check(UpdateChecker.repo != UpdateChecker.unconfiguredRepo,
+          "repo is configured (not the placeholder) → update check actually runs")
+    check(UpdateChecker.repo.contains("/"), "repo looks like 'owner/name'")
+
+    // Version comparison must only flag genuinely newer releases.
+    check(UpdateChecker.isNewer("v0.2.0", than: "0.1.0"), "newer minor → update offered")
+    check(UpdateChecker.isNewer("v1.0.0", than: "0.9.9"), "newer major → update offered")
+    check(!UpdateChecker.isNewer("v0.1.0", than: "0.1.0"), "same version → no update")
+    check(!UpdateChecker.isNewer("v0.1.0", than: "0.2.0"), "older version → no update")
+    check(UpdateChecker.isNewer("v0.1.10", than: "0.1.9"), "numeric (not lexical) compare: .10 > .9")
+}
+
 // MARK: - Summary
 
 print("\n――――――――――――――――――――")
