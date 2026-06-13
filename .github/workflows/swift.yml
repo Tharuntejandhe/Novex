@@ -1,6 +1,6 @@
-# Builds Crux and runs its test suite on every push / PR.
-# Note: Crux uses a dependency-free test runner (the `CruxDevTests` executable),
-# NOT XCTest — so we run `swift run CruxDevTests`, not `swift test`.
+# Builds Novex and runs its test suite on every push / PR.
+# Note: Novex uses a dependency-free test runner (the `NovexDevTests` executable),
+# NOT XCTest — so we run `swift run NovexDevTests`, not `swift test`.
 name: Swift
 
 on:
@@ -18,4 +18,4 @@ jobs:
     - name: Build
       run: swift build
     - name: Run tests (dependency-free runner)
-      run: swift run CruxDevTests
+      run: swift run NovexDevTests

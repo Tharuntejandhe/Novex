@@ -2,27 +2,27 @@
 import PackageDescription
 
 let package = Package(
-    name: "Crux",
+    name: "Novex",
     platforms: [.macOS(.v14)],
     targets: [
         // All app logic lives in a library so it can be imported and tested
         // (executable targets can't be @testable-imported reliably).
         .target(
-            name: "CruxCore",
-            path: "Sources/CruxCore"
+            name: "NovexCore",
+            path: "Sources/NovexCore"
         ),
         // Thin executable: just the process entry point.
         .executableTarget(
-            name: "Crux",
-            dependencies: ["CruxCore"],
-            path: "Sources/Crux"
+            name: "Novex",
+            dependencies: ["NovexCore"],
+            path: "Sources/Novex"
         ),
         // Dependency-free test runner (no XCTest, so it runs with only the
-        // Command Line Tools — no full Xcode required). Run: `swift run CruxDevTests`.
+        // Command Line Tools — no full Xcode required). Run: `swift run NovexDevTests`.
         .executableTarget(
-            name: "CruxDevTests",
-            dependencies: ["CruxCore"],
-            path: "Sources/CruxDevTests"
+            name: "NovexDevTests",
+            dependencies: ["NovexCore"],
+            path: "Sources/NovexDevTests"
         ),
     ]
 )

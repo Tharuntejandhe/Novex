@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Install Crux as a LaunchAgent so it starts at login (and restarts if it crashes).
+# Install Novex as a LaunchAgent so it starts at login (and restarts if it crashes).
 # Reads HOME so it works for any user when shipped as part of the repo.
 
 set -euo pipefail
 
-LABEL="com.tarun.crux"
-APP_PATH="${HOME}/Applications/Crux.app"
-EXEC_PATH="${APP_PATH}/Contents/MacOS/Crux"
+LABEL="com.tarun.novex"
+APP_PATH="${HOME}/Applications/Novex.app"
+EXEC_PATH="${APP_PATH}/Contents/MacOS/Novex"
 PLIST_DIR="${HOME}/Library/LaunchAgents"
 PLIST_PATH="${PLIST_DIR}/${LABEL}.plist"
-LOG_PATH="${HOME}/Library/Logs/Crux.log"
+LOG_PATH="${HOME}/Library/Logs/Novex.log"
 
 if [ ! -x "${EXEC_PATH}" ]; then
-    echo "Crux.app not found at ${APP_PATH}"
+    echo "Novex.app not found at ${APP_PATH}"
     echo "Run Scripts/make-app.sh first."
     exit 1
 fi
@@ -63,8 +63,8 @@ cat > "${PLIST_PATH}" <<EOF
 </plist>
 EOF
 
-# Stop any currently running Crux so launchd takes ownership cleanly.
-pkill -f Crux 2>/dev/null || true
+# Stop any currently running Novex so launchd takes ownership cleanly.
+pkill -f Novex 2>/dev/null || true
 sleep 0.4
 
 # If the agent is already loaded, unload it first so the new plist takes effect.
@@ -75,12 +75,12 @@ launchctl enable "gui/$(id -u)/${LABEL}"
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"
 
 sleep 0.6
-if pgrep -f Crux > /dev/null; then
+if pgrep -f Novex > /dev/null; then
     echo "Installed and running."
     echo "  Plist : ${PLIST_PATH}"
     echo "  Logs  : ${LOG_PATH}"
-    echo "Crux will now start automatically when you log in."
+    echo "Novex will now start automatically when you log in."
 else
-    echo "Loaded the agent but Crux is not running. Check ${LOG_PATH}."
+    echo "Loaded the agent but Novex is not running. Check ${LOG_PATH}."
     exit 1
 fi

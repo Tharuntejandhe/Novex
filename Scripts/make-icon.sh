@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate Crux's app icon from scratch — zero cost, no designer, no assets.
+# Generate Novex's app icon from scratch — zero cost, no designer, no assets.
 # Renders a gradient "squircle" with a sparkle glyph at 1024px (CoreGraphics),
 # then expands to a full .icns via sips + iconutil.
 #
@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 OUT_DIR="Resources"
 ICONSET="$(mktemp -d)/AppIcon.iconset"
-MASTER="$(mktemp -d)/crux-1024.png"
+MASTER="$(mktemp -d)/novex-1024.png"
 mkdir -p "${OUT_DIR}" "${ICONSET}"
 
 echo "==> rendering 1024px master with CoreGraphics"
@@ -39,7 +39,7 @@ NSColor.black.setFill()
 path.fill()
 ctx.restoreGState()
 
-// Gradient fill (indigo → violet → blue) — the "crux".
+// Gradient fill (indigo → violet → blue) — the "novex".
 path.addClip()
 let gradient = NSGradient(colors: [
     NSColor(calibratedRed: 0.36, green: 0.24, blue: 0.86, alpha: 1.0),

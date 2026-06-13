@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Build Crux.app from the Swift Package and install to ~/Applications.
+# Build Novex.app from the Swift Package and install to ~/Applications.
 # Ad-hoc signs so TCC permissions (Full Disk Access, Automation, etc.) survive rebuilds.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP_NAME="Crux"
-BUNDLE_ID="com.tarun.crux"
+APP_NAME="Novex"
+BUNDLE_ID="com.tarun.novex"
 VERSION="0.1.0"
 INSTALL_DIR="${HOME}/Applications"
 APP_DIR="${INSTALL_DIR}/${APP_NAME}.app"
 CONTENTS_DIR="${APP_DIR}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 
-echo "==> swift build -c release --product Crux"
+echo "==> swift build -c release --product Novex"
 # Build ONLY the app product. Building the whole package in release would also
-# try to compile CruxDevTests, whose `@testable import CruxCore` only works in
+# try to compile NovexDevTests, whose `@testable import NovexCore` only works in
 # a testing-enabled (debug) build and fails under -c release.
-swift build -c release --product Crux
+swift build -c release --product Novex
 
 echo "==> packaging ${APP_DIR}"
 mkdir -p "${INSTALL_DIR}"
@@ -79,30 +79,30 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSMicrophoneUsageDescription</key>
-    <string>Crux uses the microphone to let you ask questions about your mail by voice.</string>
+    <string>Novex uses the microphone to let you ask questions about your mail by voice.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
-    <string>Crux transcribes your spoken questions on-device using Apple's Speech framework. Nothing is uploaded.</string>
+    <string>Novex transcribes your spoken questions on-device using Apple's Speech framework. Nothing is uploaded.</string>
     <key>NSCalendarsFullAccessUsageDescription</key>
-    <string>Crux reads your calendar on your Mac to show what's next and connect meetings to the related emails. Your calendar never leaves your computer.</string>
+    <string>Novex reads your calendar on your Mac to show what's next and connect meetings to the related emails. Your calendar never leaves your computer.</string>
     <key>NSRemindersFullAccessUsageDescription</key>
-    <string>Crux reads your Reminders on your Mac so it can show what's on your plate alongside your mail. Your reminders never leave your computer.</string>
+    <string>Novex reads your Reminders on your Mac so it can show what's on your plate alongside your mail. Your reminders never leave your computer.</string>
 </dict>
 </plist>
 EOF
 
 # Signing strategy (zero-cost / no paid Developer ID):
 #
-# Prefer a STABLE self-signed code-signing identity ("Crux Local"). macOS keys
+# Prefer a STABLE self-signed code-signing identity ("Novex Local"). macOS keys
 # TCC permissions (Full Disk Access, Microphone) to the signing identity, so a
 # stable cert makes those grants PERSIST across rebuilds. Ad-hoc signing
 # (`--sign -`) re-hashes on every build → macOS silently revokes Full Disk
 # Access each time, which masquerades as "mail stopped syncing."
 #
 # One-time setup (no cost): Keychain Access → Certificate Assistant →
-#   Create a Certificate…  Name: "Crux Local",  Identity Type: Self Signed Root,
+#   Create a Certificate…  Name: "Novex Local",  Identity Type: Self Signed Root,
 #   Certificate Type: Code Signing → Create.  Every rebuild then reuses it.
-SIGN_IDENTITY="Crux Local"
-# NOTE: no -v here. A self-signed "Crux Local" cert is untrusted
+SIGN_IDENTITY="Novex Local"
+# NOTE: no -v here. A self-signed "Novex Local" cert is untrusted
 # (CSSMERR_TP_NOT_TRUSTED), so `find-identity -v` (valid-only) hides it — but
 # codesign signs with it fine, and TCC keys on the (stable) signing identity, not
 # on system trust, so Full Disk Access still persists across rebuilds.
@@ -112,16 +112,16 @@ if security find-identity -p codesigning 2>/dev/null | grep -q "${SIGN_IDENTITY}
 else
     echo "==> ad-hoc signing (no '${SIGN_IDENTITY}' identity found)"
     echo "    NOTE: ad-hoc re-hashes every build → macOS revokes Full Disk Access each rebuild."
-    echo "    To make FDA persist, create a self-signed 'Crux Local' Code Signing cert in Keychain Access."
+    echo "    To make FDA persist, create a self-signed 'Novex Local' Code Signing cert in Keychain Access."
     codesign --force --deep --sign - "${APP_DIR}"
 fi
 
 echo ""
 echo "Built: ${APP_DIR}"
 
-LABEL="com.tarun.crux"
+LABEL="com.tarun.novex"
 if launchctl print "gui/$(id -u)/${LABEL}" >/dev/null 2>&1; then
-    pkill -f Crux 2>/dev/null || true
+    pkill -f Novex 2>/dev/null || true
     sleep 0.4
     launchctl kickstart -k "gui/$(id -u)/${LABEL}" >/dev/null 2>&1 || true
     echo "Restarted via launchd (login item is installed)."
