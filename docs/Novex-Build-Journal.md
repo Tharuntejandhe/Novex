@@ -171,10 +171,10 @@ Getting the notch panel to look right took many rounds of user feedback:
 Tried the macOS 26 Liquid Glass (`.glassEffect`) for the card and the flying drop — it looked premium but the user said "remove it, we'll figure it out later." Reverted to solid black. *Lesson: ship the agreed look; park the experiment.*
 
 ### The rename: Aura → Novex
-The app was "Aura" for most of its life. For the public launch the user wanted a unique, short, meaningful name. After two rounds of suggestions, **Novex** was chosen — "the most important point," and also Latin for *cross* (the Southern Cross constellation), which ties to the app's dot/sparkle motif. A full global rename followed: Swift targets (`NovexCore`/`Novex`/`NovexDevTests`), bundle id `com.tarun.novex`, app name, launchd label, log file, signing cert, every UI string. The bundle-id change reset Full Disk Access (a known, one-time cost).
+The app was "Aura" for most of its life. For the public launch the user wanted a unique, short, available name. After many rounds of candidates (most short, cool names were already taken or trademarked), **Novex** was chosen — a coined word (nov-, "new") that is easy to say, globally neutral, and had a clean namespace: GitHub org, Homebrew tap, and domain were all free. A full global rename followed: Swift targets (`NovexCore`/`Novex`/`NovexDevTests`), bundle id `com.tarun.novex`, app name, launchd label, log file, signing cert, every UI string. The bundle-id change reset Full Disk Access (a known, one-time cost).
 
 ### The logo
-Designed in CoreGraphics (zero cost, no art tools). After two batches of concepts (constellation, crosshair, sparkle, convergence, navigator star, monogram), the user chose **"Convergence"** — rays distilling inward to one glowing novex point, with a subtle cross baked in. Rendered at every icon size via `iconutil`.
+Designed in CoreGraphics (zero cost, no art tools). After two batches of concepts (constellation, crosshair, sparkle, convergence, navigator star, monogram), the user chose **"Convergence"** — rays distilling inward to one glowing center point. Rendered at every icon size via `iconutil`.
 
 ---
 
