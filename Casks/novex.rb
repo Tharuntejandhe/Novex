@@ -16,7 +16,7 @@ cask "novex" do
   desc "On-device, private email assistant that lives in your menu bar"
   homepage "https://github.com/Tharuntejandhe/Novex"
 
-  depends_on macos: ">= :tahoe" # macOS 26+
+  depends_on macos: :tahoe # macOS 26+ (minimum)
 
   app "Novex.app"
 
