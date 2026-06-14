@@ -922,10 +922,41 @@ final class BriefingService {
 
         // Collapse duplicates / threads (prefers conversationID, else sender+subject).
         let prioritized = Self.collapseDuplicates(ordered)
+
+        // Detected deadlines, computed ONCE per message (regex — never in a sort).
+        let deadlineByID: [Int64: Date] = Dictionary(
+            active.compactMap { msg in msg.detectedDeadline.map { (msg.id, $0) } },
+            uniquingKeysWith: { a, _ in a })
+        func pendingDeadline(_ m: MailMessage) -> Bool {
+            guard let d = deadlineByID[m.id] else { return false }
+            return d > Date()
+        }
+
         // ONE definition of "needs you", reused for featuring + counts + badge +
         // caught-up so they can never disagree. A note-to-self never qualifies.
-        let importantGroups = prioritized.filter {
-            !$0.message.isFromSelf(mine) && rank($0.message) >= 30
+        // A READ action with nothing still pending is assumed HANDLED — you read
+        // it and acted (e.g. the GitHub 2FA you already did) — so we stop nagging.
+        // Keep a read item ONLY if it's flagged/VIP, you still owe a reply, or it
+        // has a future deadline that hasn't passed (PayPal "verify by Jul 14").
+        let dismissed = DismissStore.dismissed()
+        var importantGroups = prioritized.filter { g -> Bool in
+            let m = g.message
+            guard !m.isFromSelf(mine),
+                  !(m.messageID.map(dismissed.contains) ?? false),   // you marked it done
+                  rank(m) >= 30 else { return false }
+            if !m.isRead { return true }
+            if m.isFlagged || VIPStore.isVIP(m.senderAddress) { return true }
+            if m.needsFollowUp && m.isReplyable { return true }
+            return pendingDeadline(m)
+        }
+        // One row per sender in the featured set — two GitHub 2FA emails (or any
+        // sender blasting near-identical mail) shouldn't each take a slot and look
+        // like duplicates. `prioritized` is rank-sorted, so we keep the top one.
+        var seenSenders = Set<String>()
+        importantGroups = importantGroups.filter { g in
+            let key = (g.message.senderAddress?.lowercased()).map { "a:\($0)" }
+                ?? "n:\(g.message.senderDisplay.lowercased())"
+            return seenSenders.insert(key).inserted
         }
 
         // Learning: note which senders we showed (runs only on inbox CHANGE), and
@@ -934,7 +965,13 @@ final class BriefingService {
         OwnerModel.learnFlagged(messages)
 
         let seenAt = lastOpenedAt
-        var items: [BriefingItem] = prioritized.prefix(4).map {
+        // Featured rows come from the CURATED set (handled / self / duplicates
+        // already removed). When nothing's important, show a little recent context
+        // (still excluding your own notes) so the caught-up state reads naturally.
+        let featureSource: [MessageGroup] = importantGroups.isEmpty
+            ? Array(prioritized.filter { !$0.message.isFromSelf(mine) }.prefix(4))
+            : Array(importantGroups.prefix(4))
+        var items: [BriefingItem] = featureSource.map {
             Self.makeItem(from: $0, mine: mine, seenAt: seenAt)
         }
         if items.isEmpty {

@@ -793,6 +793,20 @@ group("brain v2 — self, actions, rescue, personal, bots") {
     check(longTitle.count <= 73 && longTitle.hasSuffix("…"), "long subject clipped with ellipsis")
 }
 
+group("dismiss store — mark done, stop showing") {
+    let id = "<dismiss-test-\(UInt8.random(in: 0...255))@x>"
+    DismissStore.restore(id)
+    check(!DismissStore.isDismissed(id), "not dismissed initially")
+    DismissStore.dismiss(id)
+    check(DismissStore.isDismissed(id), "dismissed after marking done")
+    check(!DismissStore.isDismissed("<other@x>"), "only the dismissed id is affected")
+    DismissStore.restore(id)
+    check(!DismissStore.isDismissed(id), "restore clears it")
+    DismissStore.dismiss(nil)
+    DismissStore.dismiss("")
+    check(!DismissStore.isDismissed(""), "nil/empty ids are ignored")
+}
+
 // MARK: - Summary
 
 print("\n――――――――――――――――――――")

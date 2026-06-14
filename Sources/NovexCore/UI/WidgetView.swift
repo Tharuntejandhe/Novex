@@ -417,7 +417,9 @@ struct WidgetView: View {
     /// they wake. (`dataRevision` makes this recompute right after a snooze.)
     private var visibleItems: [BriefingItem] {
         _ = dataRevision
-        return service.briefing.items.filter { !SnoozeStore.isAsleep($0.messageID) }
+        return service.briefing.items.filter {
+            !SnoozeStore.isAsleep($0.messageID) && !DismissStore.isDismissed($0.messageID)
+        }
     }
 
     /// Caught up = nothing genuinely IMPORTANT (human / flagged / high-impact /
@@ -515,12 +517,23 @@ struct WidgetView: View {
 
     /// "On your plate" — open Apple Reminders due/overdue, so Novex is aware of
     /// your todos, not just your mail.
+    /// Only reminders that are actually DUE — overdue, today, or tomorrow. We
+    /// never mirror the user's whole Reminders-app list (that's pointless: they
+    /// already have it). Undated/next-week items are planning, not a "remind me".
+    private var dueSoonTodos: [Todo] {
+        let cal = Calendar.current
+        return reminders.todos.filter { t in
+            guard let due = t.due else { return false }
+            return t.isOverdue() || cal.isDateInToday(due) || cal.isDateInTomorrow(due)
+        }
+    }
+
     @ViewBuilder
     private var todoSection: some View {
-        if !reminders.todos.isEmpty {
+        if !dueSoonTodos.isEmpty {
             VStack(alignment: .leading, spacing: 6) {
-                sectionLabel("ON YOUR PLATE")
-                ForEach(reminders.todos) { todo in
+                sectionLabel("DUE SOON")
+                ForEach(dueSoonTodos) { todo in
                     HStack(spacing: 8) {
                         Image(systemName: "circle")
                             .font(.system(size: 11, weight: .medium))
@@ -613,6 +626,18 @@ struct WidgetView: View {
                         .appKitTap { primaryAction(item) }
                         .help(primaryHelp(item))
                     if item.messageID != nil {
+                        Image(systemName: "checkmark.circle")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.white.opacity(0.32))
+                            .padding(.top, 2)
+                            .appKitTap {
+                                // "I've handled this" — clear it for good, even if the
+                                // email is still unread (you acted outside of mail).
+                                DismissStore.dismiss(item.messageID)
+                                dataRevision += 1
+                                Task { await service.refresh() }
+                            }
+                            .help("Mark done — stop showing this")
                         Image(systemName: "clock.badge")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white.opacity(0.3))
