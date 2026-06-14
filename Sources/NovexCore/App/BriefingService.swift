@@ -462,6 +462,17 @@ final class BriefingService {
     private var refreshTask: Task<Void, Never>?
     private let refreshInterval: TimeInterval = 300 // 5 min
 
+    /// Always-on new-mail watchdog. The main `refreshTask` poll is cancelled
+    /// whenever the panel closes (battery), which used to leave the FSEvents
+    /// `MailWatcher` as the SOLE trigger for the closed-panel notch card — and
+    /// FSEvents on `~/Library/Mail` is unreliable on recent macOS, so new mail
+    /// silently produced no notification. This heartbeat runs regardless of
+    /// panel state: every `heartbeatInterval` it does a cheap, bodies-free,
+    /// no-LLM signature read and only escalates to a full `refresh()` (which
+    /// fires the peek) when the inbox actually changed. Negligible battery cost.
+    private var heartbeatTask: Task<Void, Never>?
+    private let heartbeatInterval: TimeInterval = 30
+
     /// Whether the widget is on-screen and the Mac is awake. We only poll
     /// while active — when the widget is occluded or the system sleeps we
     /// tear the timer down entirely so we draw zero background power.
@@ -500,6 +511,41 @@ final class BriefingService {
         Task { await NotificationService.shared.requestAuthorizationIfNeeded() }
         Task { await refresh() }
         resumeRefreshLoop()
+        startHeartbeat()
+    }
+
+    /// Closed-panel new-mail watchdog — see `heartbeatTask`. Runs for the whole
+    /// app lifetime, independent of the on-screen/asleep poll loop.
+    private func startHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(self.heartbeatInterval * 1_000_000_000))
+                if Task.isCancelled { break }
+                await self.refreshIfStoreChanged()
+            }
+        }
+    }
+
+    /// Cheap "did the inbox change?" probe for the heartbeat: a bodies-free,
+    /// no-LLM header read. Only when the store signature differs from the last
+    /// briefing do we run a full `refresh()` (which fires the notch peek for new
+    /// important mail). Guarded so it never runs before the first load, mid
+    /// question, or without Full Disk Access.
+    private func refreshIfStoreChanged() async {
+        guard !isAnswering, hasEverLoaded,
+              mailReader.hasFullDiskAccess, mailReader.mailIsConfigured else { return }
+        let cutoff = Date().addingTimeInterval(-24 * 3600)
+        let reader = mailReader
+        let sig = await Task.detached(priority: .utility) { () -> String? in
+            guard let msgs = try? reader.recentMessages(since: cutoff, limit: 50, includeBodies: false)
+            else { return nil }
+            return Self.signature(of: msgs)
+        }.value
+        guard let sig, sig != lastSignature else { return }
+        MailSync.note("heartbeat: inbox changed (sig \(sig)) → refresh")
+        await refresh()
     }
 
     // MARK: - Power-aware lifecycle
@@ -724,6 +770,9 @@ final class BriefingService {
         // on-device model entirely. This is the main battery saver while the
         // widget sits visible but the inbox is quiet.
         let signature = Self.signature(of: messages)
+        let unreadNow = messages.filter { !$0.isRead }.count
+        // PII-free operational log (counts + signature only, no sender/subject).
+        MailSync.log("refresh: read \(messages.count) msgs, \(unreadNow) unread; changed=\(signature != lastSignature)")
         if signature == lastSignature, hasEverLoaded {
             state = .ready
             return
@@ -901,18 +950,28 @@ final class BriefingService {
         let actionableNow = replyN + payN + confirmN + reviewN
         setMenuBarCount(max(importantCount, actionableNow))
 
-        // Notch peek for genuinely NEW + IMPORTANT mail only (not newsletters /
-        // job-alert blasts / social spam). Baseline on first load.
-        if let newestImportant = active.filter({ !$0.isRead && $0.isImportant })
-            .max(by: { $0.dateReceived < $1.dateReceived }) {
-            if !isFirstEverLoad, newestImportant.dateReceived > lastPeekDate {
+        // Notch peek for genuinely NEW mail from a REAL sender. Broader than the
+        // briefing's "important" bar (≥30) on purpose: we tap the user for any
+        // real new message — even one Apple Mail happens to flag "automated"
+        // (which wrongly suppressed e.g. mail you send yourself) — but stay
+        // SILENT for newsletters (List-Unsubscribe) and no-reply / notification
+        // bots, so it's not spammy. VIPs always notify. Baseline on first load.
+        let notifyCandidates = active.filter {
+            guard !$0.isRead else { return false }
+            if VIPStore.isVIP($0.senderAddress) { return true }
+            return !$0.isNotificationSender && $0.unsubscribeType == 0
+        }
+        if let newest = notifyCandidates.max(by: { $0.dateReceived < $1.dateReceived }) {
+            if !isFirstEverLoad, newest.dateReceived > lastPeekDate {
+                // PII-free: count only, no sender/subject in the log.
+                MailSync.note("notch: showing new-mail card (\(notifyCandidates.count) unread candidate(s))")
                 NotchModel.shared.showPeek(
                     icon: "envelope.fill",
-                    title: "New from \(newestImportant.senderDisplay)",
-                    subtitle: newestImportant.subject,
-                    messageID: newestImportant.messageID)
+                    title: "New from \(newest.senderDisplay)",
+                    subtitle: newest.subject,
+                    messageID: newest.messageID)
             }
-            lastPeekDate = max(lastPeekDate, newestImportant.dateReceived)
+            lastPeekDate = max(lastPeekDate, newest.dateReceived)
         }
 
         // Discover: interesting reads from your OWN newsletters, matched to what

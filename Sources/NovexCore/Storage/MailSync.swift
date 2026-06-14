@@ -33,6 +33,14 @@ enum MailSync {
         logger.debug("\(message, privacy: .public)")
     }
 
+    /// Like `log`, but at `.notice` level so it's PERSISTED (visible to
+    /// `log show`, not just a live `log stream`). Use for the few key lifecycle
+    /// events worth keeping — watcher fired, new-mail detected, notch peek shown
+    /// — so notification problems can be diagnosed after the fact.
+    static func note(_ message: String) {
+        logger.notice("\(message, privacy: .public)")
+    }
+
     /// If Mail isn't running, launch it hidden so it can sync in the
     /// background. Returns true if we launched it (caller may then allow a
     /// grace period for the first sync). No-op — and no side effects — if Mail

@@ -9,6 +9,10 @@ import Observation
 public final class NotchController {
     private var panel: NSPanel?
     private var container: PassthroughView?
+    /// Pending "order the notch window off screen" after a card collapses —
+    /// delayed so the fade-out finishes (no lingering shadow), cancellable if a
+    /// new peek arrives first.
+    private var hideWork: DispatchWorkItem?
     private let model = NotchModel.shared
     private var geometry: NotchGeometry
     private let panelSize: CGSize
@@ -77,22 +81,32 @@ public final class NotchController {
 
     private func updateActiveRect() {
         guard let c = container, let panel else { return }
+        // Any pending "order off screen" is stale now — cancel it.
+        hideWork?.cancel(); hideWork = nil
         if model.peek != nil {
             // A card is on screen → make the window interactive + visible.
             panel.ignoresMouseEvents = false
+            panel.alphaValue = 1
             let w = panelSize.width, h = panelSize.height
             let cw = PeekLayout.cardWidth, ch = PeekLayout.cardHeight
             c.activeRect = CGRect(x: (w - cw) / 2, y: h - topGap - ch, width: cw, height: ch)
             panel.orderFrontRegardless()
         } else {
-            // No card → take the window OFF screen entirely so it can NEVER
-            // intercept a click in the top-center region. This is the bulletproof
-            // fix for the recurring "dead click-zone under the notch" bug:
-            // ignoresMouseEvents alone has failed in edge cases, but an
-            // ordered-out window is physically incapable of catching a click.
+            // Card is collapsing. Stop intercepting clicks IMMEDIATELY — this is
+            // what actually kills the "dead click-zone under the notch": an empty
+            // activeRect makes PassthroughView.hitTest return nil, and
+            // ignoresMouseEvents=true is a second guard, so the window cannot
+            // catch a click even while still on screen.
             c.activeRect = .zero
             panel.ignoresMouseEvents = true
-            panel.orderOut(nil)
+            // Do NOT orderOut yet: pulling the window off screen mid-fade leaves
+            // the card's drop-shadow as window-server residue (it only clears on
+            // the next composite — e.g. when the flight dot lands and the popover
+            // opens). Let the SwiftUI collapse animation redraw the card away
+            // first, THEN order off screen. (Cancelled above if a new peek lands.)
+            let work = DispatchWorkItem { [weak panel] in panel?.orderOut(nil) }
+            hideWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)
         }
     }
 
