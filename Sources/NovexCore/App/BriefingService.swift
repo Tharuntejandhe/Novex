@@ -1045,12 +1045,26 @@ final class BriefingService {
         // a clinical status line.
         if importantGroups.isEmpty { summary = Self.casualSummary(of: prioritized) }
 
+        // The REST of the inbox — everything recent that ISN'T a featured action
+        // item or your own note — so you still see all your mail under "RECENT",
+        // not just the few things that need you. (When caught-up, `items` already
+        // holds the top recent, so don't repeat them here.)
+        let featuredIDs = Set(items.compactMap { $0.messageID })
+        let recentItems: [BriefingItem] = importantGroups.isEmpty ? [] : prioritized
+            .filter { g in
+                !g.message.isFromSelf(mine)
+                    && !(g.message.messageID.map(featuredIDs.contains) ?? false)
+            }
+            .prefix(10)
+            .map { Self.makeItem(from: $0, mine: mine, seenAt: seenAt) }
+
         briefing = Briefing(
             generatedAt: Date(),
             items: items,
             totalUnread: unread.count,
             summary: summary,
-            importantCount: importantGroups.count
+            importantCount: importantGroups.count,
+            recent: recentItems
         )
         hasEverLoaded = true
 

@@ -422,6 +422,36 @@ struct WidgetView: View {
         }
     }
 
+    /// The rest of the recent inbox (newsletters, job alerts, FYI), shown under
+    /// "RECENT" so you still see everything — not just the things that need you.
+    private var recentVisible: [BriefingItem] {
+        _ = dataRevision
+        return service.briefing.recent.filter {
+            !SnoozeStore.isAsleep($0.messageID) && !DismissStore.isDismissed($0.messageID)
+        }
+    }
+
+    /// Plain rows for the rest of the inbox — tap to open, no Done/snooze (they're
+    /// context, not tasks).
+    private var recentRows: some View {
+        ForEach(recentVisible) { item in
+            rowContent(item)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .appKitTap { primaryAction(item) }
+                .help(primaryHelp(item))
+        }
+    }
+
+    /// An item you can actually COMPLETE (reply / pay / confirm / review) — the
+    /// only kind that gets a "Done" affordance.
+    private func isActionItem(_ item: BriefingItem) -> Bool {
+        switch item.action {
+        case .reply, .pay, .confirm, .review: return true
+        default: return false
+        }
+    }
+
     /// Caught up = nothing genuinely IMPORTANT (human / flagged / high-impact /
     /// VIP). A pile of unread newsletters and job alerts is NOT "needs you" — it
     /// shows calmly under RECENT instead of as a fake briefing.
@@ -447,7 +477,14 @@ struct WidgetView: View {
                     itemRows
                 }
             } else {
-                itemRows
+                if !visibleItems.isEmpty {
+                    sectionLabel("NEEDS YOU")
+                    itemRows
+                }
+                if !recentVisible.isEmpty {
+                    sectionLabel("RECENT")
+                    recentRows
+                }
             }
 
             discoverSection
@@ -625,7 +662,9 @@ struct WidgetView: View {
                         .contentShape(Rectangle())
                         .appKitTap { primaryAction(item) }
                         .help(primaryHelp(item))
-                    if item.messageID != nil {
+                    // "Done" is only meaningful for an actual ACTION you can
+                    // complete (reply / pay / confirm / review) — not an FYI row.
+                    if item.messageID != nil, isActionItem(item) {
                         Image(systemName: "checkmark.circle")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.white.opacity(0.32))
@@ -638,6 +677,8 @@ struct WidgetView: View {
                                 Task { await service.refresh() }
                             }
                             .help("Mark done — stop showing this")
+                    }
+                    if item.messageID != nil {
                         Image(systemName: "clock.badge")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.white.opacity(0.3))

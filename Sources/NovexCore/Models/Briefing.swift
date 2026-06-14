@@ -273,6 +273,10 @@ struct Briefing: Equatable {
     /// How many messages were genuinely important (worth featuring). 0 means the
     /// inbox is just noise → show the calm "caught up" state, not fake analysis.
     var importantCount: Int = 0
+    /// The REST of the recent inbox (newsletters, job alerts, FYI mail) — shown
+    /// under "RECENT" below the action items so you still see everything, not just
+    /// the few things that need you. Excludes the featured items and your own notes.
+    var recent: [BriefingItem] = []
 
     static let empty = Briefing(generatedAt: .distantPast, items: [], totalUnread: 0, summary: nil)
 }
