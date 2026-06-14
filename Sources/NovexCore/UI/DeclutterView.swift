@@ -102,7 +102,7 @@ struct DeclutterView: View {
                 .font(.system(size: 18))
                 .foregroundStyle(.green.opacity(0.6))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Inbox's clean")
+                Text("Your inbox is clean")
                     .font(.system(size: 13.5, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.95))
                 Text("No newsletters piling up in the last 30 days.")

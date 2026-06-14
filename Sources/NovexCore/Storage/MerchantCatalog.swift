@@ -55,8 +55,10 @@ enum MerchantCatalog {
               domains: ["anthropic.com"], nameTokens: ["claude"], typicalMonthlyUSD: 20.0, defaultCycle: .monthly),
         .init(key: "perplexity", displayName: "Perplexity Pro", category: .ai,
               domains: ["perplexity.ai"], nameTokens: ["perplexity"], typicalMonthlyUSD: 20.0, defaultCycle: .monthly),
+        // NOTE: no bare "github.com" domain — it matched EVERY GitHub notification
+        // (PR/issue mail) and mis-tagged it "GitHub Copilot". Identified by name only.
         .init(key: "copilot", displayName: "GitHub Copilot", category: .ai,
-              domains: ["github.com"], nameTokens: ["copilot"], typicalMonthlyUSD: 10.0, defaultCycle: .monthly),
+              domains: [], nameTokens: ["copilot", "github copilot"], typicalMonthlyUSD: 10.0, defaultCycle: .monthly),
 
         // Software / productivity
         .init(key: "adobe", displayName: "Adobe Creative Cloud", category: .software,
@@ -157,7 +159,11 @@ enum MerchantCatalog {
                 return m
             }
         }
-        let haystack = "\(senderName ?? "") \(subject)".lowercased()
+        // Name tokens match the SENDER NAME / address only — NOT the subject.
+        // Matching arbitrary subject text manufactured subscriptions from ordinary
+        // mail (a PR titled "...max..." became a paid plan). The sender identifies
+        // the merchant; the subject is just what they wrote about.
+        let haystack = "\(senderName ?? "") \(senderAddress ?? "")".lowercased()
         for m in all {
             for token in m.nameTokens where !token.isEmpty && haystack.contains(token) {
                 return m

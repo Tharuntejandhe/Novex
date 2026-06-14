@@ -150,6 +150,17 @@ enum SubscriptionDetector {
     /// surface it, named after the sender, so nothing is missed.
     static func genericCandidate(from m: MailMessage) -> Candidate? {
         if isNonSubscriptionEmail(subject: m.subject.lowercased(), snippet: m.snippet) { return nil }
+        // An UNKNOWN-merchant subscription worth surfacing comes from a billing /
+        // receipt address — never from a notification bot (notifications@github,
+        // alerts@…). Excluding these kills the "Pixxel $12" GitHub/Vercel
+        // false positive; known no-reply billers (Spotify/Netflix) are covered by
+        // the catalog path, not here.
+        if m.isNotificationSender { return nil }
+        // A non-catalog sender must show a STRONG billing token (receipt / payment
+        // / invoice / charged) — not merely contain a number. Otherwise any mail
+        // with "$12" in it (a GitHub PR, a price quote) becomes a fake "$12 sub".
+        let lower = (m.subject + " " + (m.snippet ?? "")).lowercased()
+        guard hasStrongBillingSignal(lower) else { return nil }
         var (amount, currency) = parseAmount(from: m.subject)
         if amount == nil, let snip = m.snippet, !snip.isEmpty {
             (amount, currency) = parseAmount(from: snip)
@@ -293,6 +304,12 @@ enum SubscriptionDetector {
     /// statements, money requests/transfers. These caused the worst false
     /// positives (a PayPal tax-invoice notification listed as ₹1.9L/mo).
     static let nonSubscriptionTokens = [
+        // Fee / rate / pricing-change notices — informational, not a charge you pay
+        // (e.g. Payoneer "lower card fees" became a "$0.49 subscription").
+        "fee change", "fees change", "lower card fees", "card fees",
+        "rate change", "fee update", "pricing update", "price update",
+        "changes to our", "update to our terms", "updates to our terms",
+        "terms of service", "terms and conditions",
         "tax invoice",
         "you have received",
         "you've received",
@@ -328,12 +345,15 @@ enum SubscriptionDetector {
         guard amount > 0 else { return false }
         let monthlyEquivalent = amount * (cycleHint ?? .monthly).perYear / 12.0
         let ceiling: Double
+        let floor: Double   // below this, it's a fee/rounding artifact, not a sub
         switch currency ?? "USD" {
-        case "INR": ceiling = 80_000
-        case "JPY": ceiling = 200_000
-        default:    ceiling = 1_500   // USD / EUR / GBP / CAD / AUD
+        case "INR": ceiling = 80_000;  floor = 15
+        case "JPY": ceiling = 200_000; floor = 100
+        default:    ceiling = 1_500;   floor = 1   // USD / EUR / GBP / CAD / AUD
         }
-        return monthlyEquivalent <= ceiling
+        // A "$0.49/mo" reads as broken — it's a card-fee line or a parse artifact,
+        // not a subscription. Require a sane minimum as well as a ceiling.
+        return monthlyEquivalent >= floor && monthlyEquivalent <= ceiling
     }
 
     /// True only for a trial CONVERTING to paid (the "act now" signal), NOT for

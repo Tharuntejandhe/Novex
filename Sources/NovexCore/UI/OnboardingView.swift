@@ -15,6 +15,7 @@ struct OnboardingView: View {
     var onComplete: () -> Void
 
     @AppStorage("ownerName") private var ownerName = ""
+    @AppStorage("ownerEmail") private var ownerEmail = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -38,6 +39,19 @@ struct OnboardingView: View {
                 Image(systemName: "person.fill")
                     .font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).frame(width: 18)
                 TextField("What should I call you?", text: $ownerName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.95))
+            }
+            .padding(.horizontal, 11).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(Color.white.opacity(0.07)))
+
+            // Your email — so Novex knows when mail is FROM you (a note to self) and
+            // never tries to draft a reply back to you.
+            HStack(spacing: 8) {
+                Image(systemName: "envelope.fill")
+                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.6)).frame(width: 18)
+                TextField("Your email address (optional)", text: $ownerEmail)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .foregroundStyle(.white.opacity(0.95))
@@ -69,7 +83,10 @@ struct OnboardingView: View {
                     .appKitTap(openFullDiskAccessSettings)
 
                 label("Get started", filled: true)
-                    .appKitTap(onComplete)
+                    .appKitTap {
+                        OwnerIdentity.learn([ownerEmail])   // teach it "who am I"
+                        onComplete()
+                    }
             }
             .padding(.top, 2)
 

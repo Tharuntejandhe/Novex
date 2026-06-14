@@ -63,6 +63,9 @@ final class FollowUpService {
         myAddresses = Set(visible
             .filter { MailReader.isSentMailbox($0.mailbox) }
             .compactMap { $0.senderAddress?.lowercased() })
+        // Share "who am I" with the rest of the app — the briefing uses it to
+        // recognize notes-to-self and never draft a reply back to you.
+        OwnerIdentity.learn(myAddresses)
         report = Self.buildReport(from: visible, now: now)
         lastScan = now
         state = .ready
@@ -91,10 +94,13 @@ final class FollowUpService {
     /// mailboxes). Derives "my addresses" from Sent mail, groups into threads,
     /// and classifies each by whose turn it is. Pure — no I/O.
     nonisolated static func buildReport(from messages: [MailMessage], now: Date) -> FollowUpReport {
-        // Who am I? The senders of my own Sent mail.
+        // Who am I? Senders of my own Sent mail in this window, UNION the persisted
+        // identity set — on Gmail (Sent lives under All Mail) the local window can
+        // be empty, which made answered threads wrongly resurface as "needs reply".
         let myAddresses = Set(messages
             .filter { MailReader.isSentMailbox($0.mailbox) }
             .compactMap { $0.senderAddress?.lowercased() })
+            .union(OwnerIdentity.addresses)
 
         func isMine(_ m: MailMessage) -> Bool {
             guard let a = m.senderAddress?.lowercased() else { return false }

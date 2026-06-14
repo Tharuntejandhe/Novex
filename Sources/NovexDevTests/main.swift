@@ -737,6 +737,62 @@ group("update checker — configured & version compare") {
     check(UpdateChecker.isNewer("v0.1.10", than: "0.1.9"), "numeric (not lexical) compare: .10 > .9")
 }
 
+group("brain v2 — self, actions, rescue, personal, bots") {
+    func m(_ id: Int64, _ sender: String, _ subject: String, snippet: String = "",
+           read: Bool = false, automated: Int = 0, unsub: Int = 0,
+           highImpact: Bool = false, needsReply: Bool = false, category: Int = 0,
+           name: String? = nil) -> MailMessage {
+        MailMessage(id: id, dateReceived: Date(timeIntervalSinceReferenceDate: 100 * 86_400),
+                    isRead: read, isFlagged: false, subject: subject, senderName: name,
+                    senderAddress: sender, mailbox: "imap://u@h/INBOX", messageID: "<b\(id)@x>",
+                    snippet: snippet, isUrgent: false, automatedType: automated,
+                    unsubscribeType: unsub, isHighImpact: highImpact, needsFollowUp: needsReply,
+                    category: category)
+    }
+    let me: Set<String> = ["tharun@gmail.com"]
+
+    // R2 — a note to self is never a reply, never "needs you".
+    let selfNote = m(1, "tharun@gmail.com", "My todo list", needsReply: true)
+    check(selfNote.isFromSelf(me), "recognizes my own address")
+    checkEqual(selfNote.deterministicAction(mine: me), AIAction.none, "self-note action is none, not reply")
+
+    // R3 — deterministic actions work without the LLM.
+    checkEqual(m(2, "billing@acme.com", "Your invoice is due").deterministicAction(mine: me),
+               AIAction.pay, "invoice → pay")
+    checkEqual(m(3, "no-reply@paypal.com", "Verify your identity by 14/07/2026").deterministicAction(mine: me),
+               AIAction.confirm, "verify → confirm")
+
+    // R3/R4 — a high-impact verification from a no-reply sender is RESCUED above
+    // the feature bar (the old penalties buried PayPal/GitHub/Fiverr at negative).
+    let verify = m(4, "no-reply@paypal.com", "Verify your identity by 14/07/2026",
+                   read: true, automated: 2, highImpact: true, category: 2)
+    check(verify.importanceScore >= 30, "high-impact verify clears the feature bar (was negative)")
+
+    // R4 — a friend's short personal mail isn't buried as "automated".
+    let friend = m(5, "raj@gmail.com", "hey bro", snippet: "hello", automated: 2)
+    check(friend.importanceScore >= 0, "personal gmail not slammed with the -45 automated penalty")
+    check(friend.isLikelyPersonalSender, "gmail sender flagged personal")
+
+    // R4 — bot detection anchors to the local-part, not substrings.
+    check(m(6, "noreply@x.com", "x").isNotificationSender, "noreply@ is a bot")
+    check(!m(7, "alberto@startup.com", "Quick question").isNotificationSender,
+          "real person 'alberto@' is NOT silenced as a bot")
+    check(!m(8, "security-team-lead@startup.com", "re: the audit").isNotificationSender,
+          "a human whose address merely contains 'security' isn't a bot")
+
+    // Money — a GitHub PR with a $ in it is NOT a subscription (no billing token).
+    let prMail = m(9, "notifications@github.com", "Merged #10 into main (Pixxel)", snippet: "diff +$12 lines")
+    check(SubscriptionDetector.detect(from: [prMail], now: Date()).isEmpty,
+          "github PR notification is not a fake subscription")
+    // Money — a sub-dollar fee notice is not a subscription.
+    check(!SubscriptionDetector.isPlausibleAmount(0.49, currency: "USD", cycleHint: .monthly),
+          "$0.49/mo rejected by the new floor")
+
+    // Title cleanup — a 300-char subject doesn't become a meaningless fragment.
+    let longTitle = BriefingService.cleanTitle(String(repeating: "word ", count: 80))
+    check(longTitle.count <= 73 && longTitle.hasSuffix("…"), "long subject clipped with ellipsis")
+}
+
 // MARK: - Summary
 
 print("\n――――――――――――――――――――")

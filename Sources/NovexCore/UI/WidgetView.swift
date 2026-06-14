@@ -880,18 +880,48 @@ struct WidgetView: View {
                     Text(item.title)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
+                        .lineLimit(1).truncationMode(.tail)
                     if item.isNew { newBadge }
+                    Spacer(minLength: 0)
+                    if let reason = item.reason { reasonTag(reason) }
                 }
                 HStack(spacing: 6) {
                     Text(item.detail)
                         .font(.system(size: 11))
                         .foregroundStyle(.white.opacity(0.55))
-                        .lineLimit(1)
-                    if item.action.showsPill { actionPill(item.action) }
+                        .lineLimit(1).truncationMode(.tail)
+                    if let due = item.dueDate { dueChip(due) }
+                    if item.action.showsPill { actionPill(item.action, replyable: item.replyable) }
                 }
             }
         }
+    }
+
+    /// A colored deadline chip ("due Jul 14" / "due today", overdue in red) so a
+    /// real deadline is glanceable instead of buried in free text.
+    private func dueChip(_ date: Date) -> some View {
+        let cal = Calendar.current
+        let overdue = date < Date()
+        let today = cal.isDateInToday(date)
+        let f = DateFormatter(); f.dateFormat = "MMM d"
+        let label = overdue ? "overdue" : (today ? "due today" : "due \(f.string(from: date))")
+        let color: Color = overdue ? .red : (today ? .orange : .orange.opacity(0.8))
+        return Text(label)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 6).padding(.vertical, 1.5)
+            .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(color.opacity(0.6)))
+    }
+
+    /// A subtle one-word "why this surfaced" tag (urgent / flagged / deadline …)
+    /// so the ranking isn't a black box.
+    private func reasonTag(_ reason: String) -> some View {
+        Text(reason)
+            .font(.system(size: 8.5, weight: .medium))
+            .foregroundStyle(.white.opacity(0.5))
+            .padding(.horizontal, 5).padding(.vertical, 1)
+            .background(RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(Color.white.opacity(0.08)))
     }
 
     private func openInMail(_ url: URL) {
@@ -1044,15 +1074,21 @@ struct WidgetView: View {
             )
     }
 
-    private func actionPill(_ action: AIAction) -> some View {
-        Text(action.displayLabel)
+    private func actionPill(_ action: AIAction, replyable: Bool = true) -> some View {
+        // Never promise "Reply" on something you can't reply to (a bot, a
+        // notification, your own note) — tapping would just open Mail. Downgrade
+        // the affordance to "Open" so the pill never lies.
+        let downgraded = (action == .reply && !replyable)
+        let label = downgraded ? "Open" : action.displayLabel
+        let effective: AIAction = downgraded ? .read : action
+        return Text(label)
             .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(actionForeground(action))
+            .foregroundStyle(actionForeground(effective))
             .padding(.horizontal, 6)
             .padding(.vertical, 1.5)
             .background(
                 RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(actionBackground(action))
+                    .fill(actionBackground(effective))
             )
     }
 

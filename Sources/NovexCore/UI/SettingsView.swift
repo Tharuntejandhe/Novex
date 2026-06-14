@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("flightAnimationEnabled") private var flightAnimationEnabled = true
     @AppStorage("updateCheckEnabled") private var updateCheckEnabled = true
     @AppStorage("ownerName") private var ownerName = ""
+    @AppStorage("ownerEmail") private var ownerEmail = ""
     /// Bumped to re-read the (non-observable) VIP/Mute stores after an edit.
     @State private var rev = 0
     @State private var interestInput = ""
@@ -60,6 +61,7 @@ struct SettingsView: View {
     // MARK: - Owner
 
     private var nameRow: some View {
+        VStack(alignment: .leading, spacing: 12) {
         HStack(spacing: 10) {
             Image(systemName: "person.fill")
                 .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).frame(width: 18)
@@ -72,6 +74,23 @@ struct SettingsView: View {
                     .foregroundStyle(.white.opacity(0.85))
             }
             Spacer()
+        }
+        HStack(spacing: 10) {
+            Image(systemName: "envelope.fill")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Your email").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text("So Novex knows mail from you is a note, not a reply")
+                    .font(.system(size: 9.5)).foregroundStyle(.white.opacity(0.45))
+                TextField("you@example.com", text: $ownerEmail)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .onSubmit { OwnerIdentity.learn([ownerEmail]) }
+            }
+            Spacer()
+        }
         }
     }
 

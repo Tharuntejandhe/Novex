@@ -90,8 +90,14 @@ final class BriefingService {
     /// the brief (which is what bounced the window). Cheap and safe.
     func refreshUpNext() async {
         await CalendarService.shared.refresh()
-        let messages = lastMessagesSnapshot
-        upNext = CalendarService.shared.upcoming.map { ev in
+        let events = CalendarService.shared.upcoming
+        guard !events.isEmpty else { upNext = []; return }
+        // Match each meeting to related mail against a WIDE window (30 days) — the
+        // 24h briefing snapshot almost never matched, so the "linked email" rarely
+        // showed even when one existed. Metadata-only, and only when events exist.
+        let messages = (try? await readRecent(limit: 400, hoursAgo: 30 * 24, includeBodies: false))
+            ?? lastMessagesSnapshot
+        upNext = events.map { ev in
             let emails = Set(ev.participantEmails.map { $0.lowercased() })
             let match = emails.isEmpty ? nil : messages
                 .filter { ($0.senderAddress?.lowercased()).map(emails.contains) == true }
@@ -129,6 +135,20 @@ final class BriefingService {
         let relevant = MailRetrieval.rank(question: q, messages: pool, limit: 12)
         let grounded = await attachBodies(relevant)
 
+        // Did the question genuinely MATCH anything, or did retrieval just fall
+        // back to "most recent"? If a specific ask matches nothing, the model
+        // must say so — not confidently answer from unrelated recent mail.
+        let qaStop: Set<String> = ["the","and","for","you","your","did","does","what","when",
+            "where","who","how","why","any","email","emails","mail","inbox","about","from",
+            "have","has","was","were","there","that","this","with","are","get","got"]
+        let queryTerms = Set(q.lowercased()
+            .split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            .filter { $0.count >= 3 && !qaStop.contains($0) })
+        let hasRealMatch = queryTerms.isEmpty || grounded.contains { m in
+            let hay = (m.subject + " " + (m.snippet ?? "") + " " + m.senderDisplay).lowercased()
+            return queryTerms.contains { hay.contains($0) }
+        }
+
         // SHORT context (subject + a ~110-char snippet) — feeding full bodies is
         // what made the small model paste emails back verbatim instead of
         // answering. There's nothing long to copy now.
@@ -148,8 +168,9 @@ final class BriefingService {
             }.joined(separator: "\n")
         }
 
+        let honesty = hasRealMatch ? "" : "\n\nIMPORTANT: nothing in the emails below clearly matches what they asked about. If you can't find it, say plainly that you don't see anything about that in their recent mail — do NOT answer from unrelated emails."
         let instructions = """
-        You are Novex, the user's warm, concise personal assistant. Reply in 1–2 SHORT sentences, in your OWN words, like a friend who skimmed their inbox. NEVER paste, quote, or list email contents; NEVER use bullet points, headers, greetings, or rows of asterisks — just talk naturally. Use sender names and timing when helpful. If it isn't in the data, say so briefly. Don't invent senders or subjects.
+        You are Novex, the user's warm, concise personal assistant. Reply in 1–2 SHORT sentences, in your OWN words, like a friend who skimmed their inbox. NEVER paste, quote, or list email contents; NEVER use bullet points, headers, greetings, or rows of asterisks — just talk naturally. Use sender names and timing when helpful. If it isn't in the data, say so briefly. Don't invent senders or subjects.\(honesty)
 
         \(PromptSafety.securityClause)
         """
@@ -208,21 +229,60 @@ final class BriefingService {
     /// only surfaces things that actually match what you follow, so it never shows
     /// noise. Returns [] when nothing fits — Discover stays quiet rather than dumb.
     static func computeDiscover(from messages: [MailMessage], limit: Int = 3) -> [DigestItem] {
-        let cutoff = Date().addingTimeInterval(-3 * 24 * 3600)   // last 3 days
-        let scored = messages
-            .filter { $0.unsubscribeType > 0 && !$0.isNotificationSender && $0.dateReceived >= cutoff }
+        let cutoff = Date().addingTimeInterval(-7 * 24 * 3600)   // last 7 days
+        let newsletters = messages.filter {
+            $0.unsubscribeType > 0 && !$0.isNotificationSender && $0.dateReceived >= cutoff
+        }
+        // Prefer reads matched to what you follow. But if your interest profile is
+        // still cold (a brand-new user matches nothing), fall back to the most
+        // recent newsletters — favoring non-promotional ones — so Discover is
+        // useful from day one instead of looking permanently empty.
+        let matched = newsletters
             .map { (m: $0, s: OwnerModel.score($0)) }
-            .filter { $0.s > 0 }                                  // must match what you follow
+            .filter { $0.s > 0 }
             .sorted { ($0.s, $0.m.dateReceived) > ($1.s, $1.m.dateReceived) }
+        let ranked: [(m: MailMessage, matches: Bool)]
+        if !matched.isEmpty {
+            ranked = matched.map { ($0.m, true) }
+        } else {
+            // Cold start: surface ONLY newsletters that read like genuine editorial
+            // content — never promos, loan/sale ads, social/job spam, or
+            // auto-suggested junk (this is what surfaced adult Quora "Suggested
+            // Spaces" + an SBI loan ad). Better empty than embarrassing.
+            ranked = newsletters
+                .filter(Self.looksLikeQualityRead)
+                .sorted { $0.dateReceived > $1.dateReceived }
+                .map { ($0, false) }
+        }
         var seenTitle = Set<String>(); var out: [DigestItem] = []
-        for pair in scored {
+        for pair in ranked {
             let title = Digest.cleanSubject(pair.m.subject)
             guard title.count >= 6, seenTitle.insert(title.lowercased()).inserted else { continue }
             out.append(DigestItem(label: title, sub: pair.m.senderDisplay,
-                                  messageID: pair.m.messageID, matches: true))
+                                  messageID: pair.m.messageID, matches: pair.matches))
             if out.count >= limit { break }
         }
         return out
+    }
+
+    /// Cold-start quality gate for Discover: keep only newsletters that read like
+    /// genuine editorial content, never promos / loan-sale ads / social-job spam /
+    /// auto-suggested junk. Deterministic, so it never surfaces something
+    /// embarrassing when there's no learned interest profile yet.
+    nonisolated static func looksLikeQualityRead(_ m: MailMessage) -> Bool {
+        if m.category == 3 { return false }                 // Apple "Promotions"
+        let name = (m.senderName ?? "").lowercased()
+        let addr = (m.senderAddress ?? "").lowercased()
+        let subj = m.subject.lowercased()
+        let junkSenders = ["suggested", "linkedin", "naukri", "indeed", "glassdoor",
+                           "facebook", "quora", "no-reply@", "noreply@"]
+        if junkSenders.contains(where: { name.contains($0) || addr.contains($0) }) { return false }
+        let junkSubjects = ["loan", "apply now", "% off", " sale", "discount", "winner",
+                            "lottery", "free trial", "claim your", "credit card",
+                            "adventure begins", "cashback", "% cashback", "limited time",
+                            "act now", "don't miss", "lower card fees"]
+        if junkSubjects.contains(where: { subj.contains($0) }) { return false }
+        return m.subject.count >= 12
     }
 
     @ObservationIgnored private var lastGreetAt = Date.distantPast
@@ -237,13 +297,17 @@ final class BriefingService {
         let name = (UserDefaults.standard.string(forKey: "ownerName") ?? "")
             .trimmingCharacters(in: .whitespaces)
         let hello = Self.timeGreeting(name: name)
-        if briefing.importantCount > 0 {
+        if briefing.importantCount > 0,
+           let top = briefing.items.first(where: { $0.action != .none && $0.action != .read })
+                     ?? briefing.items.first {
+            // Be specific — name the actual top item, not just a count, so the
+            // glanceable card is actually useful.
             let n = briefing.importantCount
+            let more = n > 1 ? "  ·  +\(n - 1) more" : ""
             NotchModel.shared.showPeek(
                 icon: "tray.full.fill", title: hello,
-                subtitle: n == 1 ? "1 thing needs you while you were away"
-                                 : "\(n) things need you while you were away",
-                messageID: briefing.items.first?.messageID, linger: 7)
+                subtitle: "\(top.detail): \(top.title)\(more)",
+                messageID: top.messageID, linger: 7)
             lastGreetAt = Date()
         } else if let d = discover.first {
             NotchModel.shared.showPeek(
@@ -335,7 +399,8 @@ final class BriefingService {
         guard let item = items.first(where: { $0.action == .reply && $0.messageID != nil }),
               let mid = item.messageID,
               let m = lastMessagesSnapshot.first(where: { $0.messageID == mid }),
-              m.isReplyable else {   // belt-and-suspenders: never pre-draft to a bot
+              m.isReplyable,                                   // never pre-draft to a bot
+              !m.isFromSelf(OwnerIdentity.addresses) else {    // …or a reply to yourself
             preparedReply = nil
             return
         }
@@ -509,9 +574,33 @@ final class BriefingService {
         didStart = true
         observeLifecycle()
         Task { await NotificationService.shared.requestAuthorizationIfNeeded() }
+        Task { await learnOwnerIdentity() }
         Task { await refresh() }
         resumeRefreshLoop()
         startHeartbeat()
+    }
+
+    /// Learn the user's own email addresses (from their Sent mail) so the briefing
+    /// recognizes notes-to-self and never drafts a reply back to the user. Runs
+    /// once (cheap, metadata-only) until identity is known; also fed by an address
+    /// set in onboarding/Settings and by Follow-up Radar.
+    private func learnOwnerIdentity() async {
+        guard OwnerIdentity.addresses.isEmpty, mailReader.hasFullDiskAccess else { return }
+        let reader = mailReader
+        let since = Date().addingTimeInterval(-120 * 86_400)
+        let msgs = (try? await Task.detached(priority: .utility) {
+            try reader.threadMessages(since: since, limit: 600)
+        }.value) ?? []
+        let sent = msgs
+            .filter { MailReader.isSentMailbox($0.mailbox) }
+            .compactMap { $0.senderAddress?.lowercased() }
+        OwnerIdentity.learn(sent)
+        // Also honor an address the user typed in onboarding/Settings.
+        if let typed = UserDefaults.standard.string(forKey: "ownerEmail")?
+            .lowercased().trimmingCharacters(in: .whitespaces), typed.contains("@") {
+            OwnerIdentity.learn([typed])
+        }
+        if !OwnerIdentity.addresses.isEmpty { await refresh() }
     }
 
     /// Closed-panel new-mail watchdog — see `heartbeatTask`. Runs for the whole
@@ -806,58 +895,53 @@ final class BriefingService {
         // broken by recency.
         // VIP senders get a large ranking bonus so their mail always tops the
         // briefing, regardless of the usual signals.
+        // Who am I? So a note-to-self is never featured or "replied" to.
+        let mine = OwnerIdentity.addresses
+
         let vips = VIPStore.all()
         func rank(_ m: MailMessage) -> Int {
+            // Mail you sent yourself is a note, never "needs you" — sink it.
+            if m.isFromSelf(mine) { return -10_000 }
             let vipBonus = (m.senderAddress.map { vips.contains($0.lowercased()) } ?? false) ? VIPStore.scoreBonus : 0
-            // Learned signals: senders you open (affinity) + topics you care about
-            // (owner-model). Both nudge; neither overrides the noise penalty.
-            return m.importanceScore + vipBonus
+            // Real ACTIONS get a bump even if Apple didn't flag them, so an invoice
+            // or a "verify by" from a no-reply sender isn't buried under newsletters.
+            let actionBump: Int
+            switch m.deterministicAction(mine: mine) {
+            case .pay, .confirm: actionBump = 55
+            case .review:        actionBump = 35
+            case .reply:         actionBump = 25
+            default:             actionBump = 0
+            }
+            // Learned signals: senders you open (affinity) + topics you care about.
+            return m.importanceScore + vipBonus + actionBump
                 + LearnStore.affinity(m.senderAddress) + OwnerModel.score(m)
         }
         let ordered = active.sorted {
             (rank($0), $0.dateReceived) > (rank($1), $1.dateReceived)
         }
 
-        // Collapse duplicates: Figma/LinkedIn etc send many notifications for
-        // the same thing. Group by (sender, subject) and keep the newest, with
-        // a count of how many we collapsed.
+        // Collapse duplicates / threads (prefers conversationID, else sender+subject).
         let prioritized = Self.collapseDuplicates(ordered)
-        // Genuinely important threads (human / flagged / high-impact / VIP) — the
-        // ONLY mail worth featuring. Everything else is "recent" noise. When this
-        // is empty the inbox is just newsletters/alerts → caught-up, no fake
-        // analysis. (VIP mail clears the bar via its huge rank bonus.)
-        let importantGroups = prioritized.filter { rank($0.message) >= 30 }
+        // ONE definition of "needs you", reused for featuring + counts + badge +
+        // caught-up so they can never disagree. A note-to-self never qualifies.
+        let importantGroups = prioritized.filter {
+            !$0.message.isFromSelf(mine) && rank($0.message) >= 30
+        }
 
-        // Learning: note which senders we showed (runs only on inbox CHANGE, not
-        // idle ticks, so counts stay sane), and learn interests from starred mail.
+        // Learning: note which senders we showed (runs only on inbox CHANGE), and
+        // learn interests from starred mail.
         LearnStore.recordSeen(prioritized.prefix(12).compactMap { $0.message.senderAddress })
         OwnerModel.learnFlagged(messages)
 
         let seenAt = lastOpenedAt
-        var items: [BriefingItem] = prioritized.prefix(4).map { group in
-            let m = group.message
-            let icon: String
-            if !m.isRead { icon = m.isFlagged ? "flag.fill" : "envelope.fill" }
-            else if m.isFlagged { icon = "flag" }
-            else { icon = "envelope.open" }
-            let detail = group.count > 1
-                ? "\(m.senderDisplay) · \(group.count) messages"
-                : m.senderDisplay
-            return BriefingItem(
-                icon: icon,
-                title: m.subject,
-                detail: detail,
-                action: m.isRead ? .none : .read,
-                isNew: m.dateReceived > seenAt,
-                messageID: m.messageID
-            )
+        var items: [BriefingItem] = prioritized.prefix(4).map {
+            Self.makeItem(from: $0, mine: mine, seenAt: seenAt)
         }
         if items.isEmpty {
             items = [BriefingItem(
-                id: UUID(),
                 icon: "checkmark.circle",
-                title: "Nothing recent",
-                detail: "Mail.app has no messages from the last 24h"
+                title: "You're all caught up",
+                detail: "Nothing from the last 24 hours needs you."
             )]
         }
 
@@ -877,24 +961,41 @@ final class BriefingService {
                 // messageID / "new" flag (and open the wrong email on tap).
                 // Skip items with a missing/out-of-range/duplicate index.
                 var usedIndices = Set<Int>()
-                let aiItems: [BriefingItem] = ai.items.compactMap { entry in
+                var aiItems: [BriefingItem] = ai.items.compactMap { entry in
                     guard let raw = entry.sourceIndex else { return nil }
                     let i = raw - 1
                     guard importantGroups.indices.contains(i), usedIndices.insert(i).inserted
                     else { return nil }
                     let group = importantGroups[i]
-                    // NEVER offer a reply to a no-reply/notification sender, even
-                    // if the model suggested one (you can't reply to noreply@).
-                    let action = (entry.action == .reply && !group.message.isReplyable)
-                        ? AIAction.read : entry.action
+                    let m = group.message
+                    // Trust CODE for the action/reply gate (the model mislabels —
+                    // it once labeled a self-note "reply"); trust the model only for
+                    // phrasing. Sanitize its title/detail: they're built from
+                    // attacker-controlled email text and rendered in the trusted UI.
+                    let det = m.deterministicAction(mine: mine)
+                    let action: AIAction = (det != .none && det != .read) ? det
+                        : (entry.action == .reply && !m.isReplyable ? .read : entry.action)
+                    let title = PromptSafety.sanitize(entry.title, maxChars: 80)
                     return BriefingItem(
                         icon: iconFor(category: entry.category, priority: entry.priority),
-                        title: entry.title,
-                        detail: entry.detail,
+                        title: title.isEmpty ? Self.cleanTitle(m.subject) : title,
+                        detail: PromptSafety.sanitize(entry.detail, maxChars: 120),
                         action: action,
-                        isNew: group.message.dateReceived > seenAt,
-                        messageID: group.message.messageID
+                        isNew: m.dateReceived > seenAt,
+                        messageID: m.messageID,
+                        dueDate: m.detectedDeadline,
+                        reason: m.attentionReason(mine: mine),
+                        replyable: m.isReplyable
                     )
+                }
+                // If the model under-filled (dropped/dupe indices), backfill from
+                // the top-ranked groups it skipped — never shrink the briefing.
+                if aiItems.count < min(4, importantGroups.count) {
+                    for (i, group) in importantGroups.enumerated() where !usedIndices.contains(i) {
+                        aiItems.append(Self.makeItem(from: group, mine: mine, seenAt: seenAt))
+                        usedIndices.insert(i)
+                        if aiItems.count >= min(4, importantGroups.count) { break }
+                    }
                 }
                 if !aiItems.isEmpty { items = aiItems }
             }
@@ -923,32 +1024,25 @@ final class BriefingService {
         }
 
         // Tap the user on the shoulder if something that needs them just landed.
-        // NotificationService handles backlog-baseline, throttle, and dedup; we
-        // only reach here when the inbox signature actually changed (new mail /
-        // read / flag), so this never fires on idle polls.
+        // ONE "needs you" set (importantGroups) drives the badge, the caught-up
+        // state, and the nudge — so the popover, the menu bar, and notifications
+        // can never disagree (the old code used three different definitions).
         let newestDate = active.map(\.dateReceived).max() ?? Date()
-        // Only nudge for genuinely important unread mail (urgent/high-impact/
-        // needs-reply ⇒ score ≥ 60), not every arrival.
-        let importantCount = active.filter {
-            !$0.isRead && ($0.importanceScore >= 60 || VIPStore.isVIP($0.senderAddress))
-        }.count
+        let needsYouCount = importantGroups.count
+        // Nudge only for the ones that are still UNREAD (a new arrival), so a
+        // read-but-pending action doesn't re-notify every refresh.
+        let unreadNeedsYou = importantGroups.filter { !$0.message.isRead }.count
         await NotificationService.shared.consider(
             newestMessageDate: newestDate,
-            importantCount: importantCount,
+            importantCount: unreadNeedsYou,
             headline: summary
         )
 
-        // Once-a-day "good morning" digest of what needs the user, and the
-        // menu-bar count badge — both driven off the same actionable set.
+        // Once-a-day "good morning" digest + the menu-bar badge — same set.
         let actionCounts = Dictionary(grouping: items, by: { $0.action }).mapValues(\.count)
         await NotificationService.shared.considerDailyDigest(
-            actionCounts: actionCounts, importantCount: importantCount)
-        let replyN: Int = actionCounts[.reply] ?? 0
-        let payN: Int = actionCounts[.pay] ?? 0
-        let confirmN: Int = actionCounts[.confirm] ?? 0
-        let reviewN: Int = actionCounts[.review] ?? 0
-        let actionableNow = replyN + payN + confirmN + reviewN
-        setMenuBarCount(max(importantCount, actionableNow))
+            actionCounts: actionCounts, importantCount: needsYouCount)
+        setMenuBarCount(needsYouCount)
 
         // Notch peek for genuinely NEW mail from a REAL sender. Broader than the
         // briefing's "important" bar (≥30) on purpose: we tap the user for any
@@ -1070,15 +1164,65 @@ final class BriefingService {
         let count: Int
     }
 
+    /// Build one briefing row from a (possibly collapsed) message group. Used
+    /// directly when Apple Intelligence is off, and as the action/dueDate/reason
+    /// source of truth when it's on.
+    nonisolated static func makeItem(from group: MessageGroup, mine: Set<String>, seenAt: Date) -> BriefingItem {
+        let m = group.message
+        let selfNote = m.isFromSelf(mine)
+        let icon: String
+        if selfNote { icon = "note.text" }
+        else if !m.isRead { icon = m.isFlagged ? "flag.fill" : "envelope.fill" }
+        else if m.isFlagged { icon = "flag" }
+        else { icon = "envelope.open" }
+        let sender = selfNote ? "Your note" : m.senderDisplay
+        let detail = group.count > 1 ? "\(sender) · \(group.count) messages" : sender
+        return BriefingItem(
+            icon: icon,
+            title: cleanTitle(m.subject),
+            detail: detail,
+            action: m.deterministicAction(mine: mine),
+            isNew: m.dateReceived > seenAt,
+            messageID: m.messageID,
+            dueDate: m.detectedDeadline,
+            reason: m.attentionReason(mine: mine),
+            replyable: !selfNote && m.isReplyable
+        )
+    }
+
+    /// Clean + clip a subject into a readable row title — collapses Re/Fwd and
+    /// caps length so a 300-char self-subject doesn't truncate to a meaningless
+    /// fragment. Grapheme-aware so multibyte (Hindi/CJK) text isn't cut mid-glyph.
+    nonisolated static func cleanTitle(_ subject: String, max: Int = 72) -> String {
+        // Strip Re/Fwd ourselves (Digest.cleanSubject hard-caps at 64 with NO
+        // ellipsis, which silently lost the rest of a long subject).
+        var s = subject
+        while let r = s.range(of: #"^\s*(re|fwd|fw)\s*:\s*"#, options: [.regularExpression, .caseInsensitive]) {
+            s.removeSubrange(r)
+        }
+        let base = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.isEmpty { return "(no subject)" }
+        if base.count <= max { return base }
+        return String(base.prefix(max)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+
     nonisolated static func collapseDuplicates(_ messages: [MailMessage]) -> [MessageGroup] {
         var seen: [String: (idx: Int, latest: MailMessage, count: Int)] = [:]
         var order: [String] = []
         for m in messages {
-            let normalizedSubject = m.subject
-                .lowercased()
-                .replacingOccurrences(of: #"^(re:|fwd:|fw:)\s*"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespaces)
-            let key = "\(m.senderAddress ?? "")|\(normalizedSubject)"
+            // Prefer the real conversation id (a thread that changes its subject
+            // still collapses); fall back to sender+normalized-subject only when
+            // there's no conversation id.
+            let key: String
+            if let c = m.conversationID, c != 0 {
+                key = "c\(c)"
+            } else {
+                let normalizedSubject = m.subject
+                    .lowercased()
+                    .replacingOccurrences(of: #"^(re:|fwd:|fw:)\s*"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespaces)
+                key = "\(m.senderAddress ?? "")|\(normalizedSubject)"
+            }
             if let existing = seen[key] {
                 let latest = m.dateReceived > existing.latest.dateReceived ? m : existing.latest
                 seen[key] = (existing.idx, latest, existing.count + 1)
