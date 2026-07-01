@@ -724,8 +724,17 @@ struct WidgetView: View {
         var comps = URLComponents()
         comps.scheme = "mailto"
         comps.path = pr.draft.recipientEmail ?? ""
-        comps.queryItems = [URLQueryItem(name: "subject", value: pr.draft.replySubject),
-                            URLQueryItem(name: "body", value: pr.draft.body)]
+        var items = [URLQueryItem(name: "subject", value: pr.draft.replySubject),
+                     URLQueryItem(name: "body", value: pr.draft.body)]
+        // Best-effort threading: RFC 6068 lets a mailto carry In-Reply-To/References
+        // so a compliant client files the reply in the original thread. (Apple Mail
+        // may ignore these; the "Re:" subject still gives visual threading.)
+        if !pr.messageID.isEmpty {
+            let angled = pr.messageID.hasPrefix("<") ? pr.messageID : "<\(pr.messageID)>"
+            items.append(URLQueryItem(name: "In-Reply-To", value: angled))
+            items.append(URLQueryItem(name: "References", value: angled))
+        }
+        comps.queryItems = items
         if let url = comps.url { NSWorkspace.shared.open(url) }
     }
 

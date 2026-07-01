@@ -43,6 +43,8 @@ enum MerchantCatalog {
               domains: [], nameTokens: ["apple tv+"], typicalMonthlyUSD: 9.99, defaultCycle: .monthly),
         .init(key: "applemusic", displayName: "Apple Music", category: .streaming,
               domains: [], nameTokens: ["apple music"], typicalMonthlyUSD: 10.99, defaultCycle: .monthly),
+        .init(key: "appleone", displayName: "Apple One", category: .streaming,
+              domains: [], nameTokens: ["apple one"], typicalMonthlyUSD: 19.95, defaultCycle: .monthly),
         .init(key: "audible", displayName: "Audible", category: .streaming,
               domains: ["audible.com"], nameTokens: ["audible"], typicalMonthlyUSD: 14.95, defaultCycle: .monthly),
         .init(key: "twitch", displayName: "Twitch", category: .streaming,
@@ -151,11 +153,19 @@ enum MerchantCatalog {
 
     /// Match a sender address + subject to a known merchant, if any.
     /// Tries exact/suffix domain match first (most reliable), then name tokens.
-    static func match(senderAddress: String?, senderName: String?, subject: String) -> Merchant? {
+    static func match(senderAddress: String?, senderName: String?, subject: String, body: String? = nil) -> Merchant? {
         if let domain = emailDomain(senderAddress) {
             if let exact = byDomain[domain] { return exact }
             // Suffix match: "email.netflix.com" → "netflix.com".
             for (d, m) in byDomain where domain == d || domain.hasSuffix("." + d) {
+                return m
+            }
+            // Apple bills iCloud+/Music/TV+/One from ONE address (no_reply@apple.com),
+            // naming the product only in the receipt BODY. The sender is verified-Apple
+            // (not arbitrary), so reading the product token from subject+body is safe
+            // here — unlike the general path below, which must never trust subject text
+            // from an unknown sender. Non-subscription Apple mail returns nil.
+            if isAppleDomain(domain), let m = matchAppleProduct(subject: subject, body: body) {
                 return m
             }
         }
@@ -168,6 +178,31 @@ enum MerchantCatalog {
             for token in m.nameTokens where !token.isEmpty && haystack.contains(token) {
                 return m
             }
+        }
+        return nil
+    }
+
+    /// Apple's billing domains — receipts come from no_reply@apple.com,
+    /// email.apple.com, itunes.com, etc.
+    private static func isAppleDomain(_ domain: String) -> Bool {
+        domain == "apple.com" || domain.hasSuffix(".apple.com")
+            || domain == "itunes.com" || domain.hasSuffix(".itunes.com")
+    }
+
+    /// The specific Apple subscription named in a verified-Apple receipt's
+    /// subject+body, or nil for non-subscription Apple mail (one-time App Store
+    /// purchases, order confirmations) so those are never listed as subscriptions.
+    private static func matchAppleProduct(subject: String, body: String?) -> Merchant? {
+        let hay = (subject + " " + (body ?? "")).lowercased()
+        // The bundle ("apple one") is checked before its components.
+        let products: [(key: String, tokens: [String])] = [
+            ("appleone",   ["apple one"]),
+            ("applemusic", ["apple music"]),
+            ("appletv",    ["apple tv+", "apple tv plus"]),
+            ("icloud",     ["icloud+", "icloud plus", "icloud storage", "icloud"]),
+        ]
+        for p in products where p.tokens.contains(where: { hay.contains($0) }) {
+            if let m = all.first(where: { $0.key == p.key }) { return m }
         }
         return nil
     }

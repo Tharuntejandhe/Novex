@@ -881,23 +881,13 @@ final class BriefingService {
             return
         }
 
-        // Cross-app magic: refresh the calendar and pair each upcoming event with
-        // the most recent email from one of its participants. Runs every refresh
-        // (even when mail is unchanged — the calendar may have changed). Only a
-        // local, on-device app can join your Mail and Calendar privately.
-        await CalendarService.shared.refresh()
-        upNext = CalendarService.shared.upcoming.map { ev in
-            let emails = Set(ev.participantEmails.map { $0.lowercased() }).subtracting(OwnerIdentity.addresses)
-            let match = emails.isEmpty ? nil : messages
-                .filter { ($0.senderAddress?.lowercased()).map(emails.contains) == true }
-                .max(by: { $0.dateReceived < $1.dateReceived })
-            return UpNext(
-                event: ev,
-                relatedSenderName: match?.senderDisplay,
-                relatedWhen: match?.dateReceived,
-                relatedMessageID: match?.messageID
-            )
-        }
+        // Cross-app magic: pair each upcoming meeting with the most recent email
+        // from a participant. Delegate to refreshUpNext so BOTH paths use the SAME
+        // wide (30-day) mail window — a full refresh must never clobber the pairing
+        // with refresh()'s 24h briefing snapshot (which almost never matched, so the
+        // linked email vanished after every refresh). Runs every refresh: the
+        // calendar may change even when mail doesn't. Local + on-device only.
+        await refreshUpNext()
 
         // Nothing changed since the last briefing — keep it and skip the
         // on-device model entirely. This is the main battery saver while the

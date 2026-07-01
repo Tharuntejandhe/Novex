@@ -895,6 +895,47 @@ group("tab-sweep fixes (follow-up / money / cleanup)") {
           "cleanup: a marketing newsletter IS clutter")
 }
 
+group("P2 tail (Apple subs / unsubscribe source)") {
+    func msg(_ id: Int64, day: Double, sender: String, subject: String, body: String = "",
+             unsub: Int = 0, automated: Int = 0, cat: Int = 0, name: String? = nil) -> MailMessage {
+        MailMessage(id: id, dateReceived: Date(timeIntervalSinceReferenceDate: day * 86_400),
+                    isRead: true, isFlagged: false, subject: subject, senderName: name,
+                    senderAddress: sender, mailbox: "imap://u@h/INBOX", messageID: "<t\(id)@x>",
+                    snippet: body, isUrgent: false, automatedType: automated, unsubscribeType: unsub,
+                    isHighImpact: false, needsFollowUp: false, category: cat)
+    }
+
+    // Apple bills many products from no_reply@apple.com; the product is only in the body.
+    check(MerchantCatalog.match(senderAddress: "no_reply@apple.com", senderName: "Apple",
+          subject: "Your receipt from Apple", body: "Apple Music (Individual) $10.99 Monthly")?.key == "applemusic",
+          "apple: receipt body 'Apple Music' → Apple Music sub")
+    check(MerchantCatalog.match(senderAddress: "no_reply@email.apple.com", senderName: "Apple",
+          subject: "Your receipt from Apple", body: "iCloud+ 50GB $0.99")?.key == "icloud",
+          "apple: receipt body 'iCloud+' → iCloud sub (even from email.apple.com)")
+    check(MerchantCatalog.match(senderAddress: "no_reply@apple.com", senderName: "Apple",
+          subject: "Your invoice from Apple", body: "Apple One (Individual) includes iCloud+ and Apple Music $19.95")?.key == "appleone",
+          "apple: 'Apple One' bundle wins over its iCloud/Music components")
+    check(MerchantCatalog.match(senderAddress: "no_reply@apple.com", senderName: "Apple",
+          subject: "Your receipt from Apple", body: "Monument Valley 3 $4.99") == nil,
+          "apple: a one-time App Store purchase is NOT listed as a subscription")
+
+    // End-to-end: a real Apple Music receipt surfaces as one Apple Music subscription.
+    let appleSubs = SubscriptionDetector.detect(from: [msg(90, day: 100, sender: "no_reply@apple.com",
+        subject: "Your receipt from Apple", body: "Apple Music (Individual) $10.99 Monthly. Renews Aug 1.", name: "Apple")], now: Date())
+    check(appleSubs.contains { $0.displayName == "Apple Music" },
+          "apple: end-to-end receipt → Apple Music subscription detected")
+
+    // Unsubscribe URL must come from the newest message that HAS a List-Unsubscribe
+    // header — not the newest message overall (which often lacks one).
+    let grp = DeclutterService.groupNewsletters(
+        from: [msg(10, day: 200, sender: "news@promos.com", subject: "Newest blast (no header)", unsub: 0, automated: 2, name: "Promos"),
+               msg(11, day: 150, sender: "news@promos.com", subject: "Older blast (has header)", unsub: 7, automated: 2, name: "Promos")],
+        muted: [])
+    check(grp.first?.latestRowID == 10, "cleanup: latestRowID stays the newest message (deep-link)")
+    check(grp.first?.unsubscribeRowID == 11, "cleanup: unsubscribe URL is sourced from the newest message that HAS a List-Unsubscribe header")
+    check(grp.first?.count == 2, "cleanup: both messages counted in the group")
+}
+
 // MARK: - Summary
 
 print("\n――――――――――――――――――――")

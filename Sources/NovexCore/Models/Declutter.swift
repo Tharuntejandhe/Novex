@@ -8,7 +8,8 @@ struct NewsletterSender: Identifiable, Equatable, Sendable {
     let count: Int                // how many in the scan window
     var unsubscribeURL: URL?      // from List-Unsubscribe, when we could read it
     let latestMessageID: String?  // deep-link to the latest one
-    let latestRowID: Int64        // for reading the .emlx (unsubscribe header)
+    let latestRowID: Int64        // newest message (for the deep-link)
+    let unsubscribeRowID: Int64?  // newest message that ACTUALLY carries a List-Unsubscribe header
 }
 
 /// Result Declutter binds to.

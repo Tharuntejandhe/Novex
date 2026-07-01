@@ -42,15 +42,15 @@ final class DeclutterService {
         let total = senders.reduce(0) { $0 + $1.count }
         let top = Array(senders.prefix(Self.maxSenders))
 
-        // Read the List-Unsubscribe header from each top sender's latest .emlx
+        // Read the List-Unsubscribe header from the .emlx that actually carries one
         // (file I/O — off the main actor).
-        let rowids = top.map(\.latestRowID)
+        let rowids = top.compactMap(\.unsubscribeRowID)
         let urls: [Int64: URL] = await Task.detached(priority: .utility) {
             reader.resolveUnsubscribeURLs(rowids: rowids)
         }.value
         senders = top.map { s in
             var s = s
-            s.unsubscribeURL = urls[s.latestRowID]
+            if let rid = s.unsubscribeRowID { s.unsubscribeURL = urls[rid] }
             return s
         }
 
@@ -92,24 +92,30 @@ final class DeclutterService {
     /// volume. Muted senders are excluded. Pure — no I/O.
     nonisolated static func groupNewsletters(from messages: [MailMessage], muted: Set<String>) -> [NewsletterSender] {
         var seen = Set<String>()
-        var byAddr: [String: (name: String, count: Int, latest: MailMessage)] = [:]
+        var byAddr: [String: (name: String, count: Int, latest: MailMessage, unsub: MailMessage?)] = [:]
         for m in messages {
             guard MailReader.isInboxMailbox(m.mailbox), isNewsletter(m) else { continue }
             guard let addr = m.senderAddress?.lowercased(), !addr.isEmpty else { continue }
             if muted.contains(addr) { continue }
             let dedupKey = m.messageID ?? "rid\(m.id)"
             if !seen.insert(dedupKey).inserted { continue }
+            let hasUnsub = m.unsubscribeType > 0
             if let e = byAddr[addr] {
                 let newer = m.dateReceived > e.latest.dateReceived
-                byAddr[addr] = (newer ? m.senderDisplay : e.name, e.count + 1, newer ? m : e.latest)
+                // The unsubscribe link must come from the newest message that ACTUALLY
+                // has a List-Unsubscribe header — the newest message overall often
+                // doesn't (a promo run mixes header-less blasts in), which left the
+                // sender with no unsubscribe button even though an older one had it.
+                let unsub = (hasUnsub && (e.unsub == nil || m.dateReceived > e.unsub!.dateReceived)) ? m : e.unsub
+                byAddr[addr] = (newer ? m.senderDisplay : e.name, e.count + 1, newer ? m : e.latest, unsub)
             } else {
-                byAddr[addr] = (m.senderDisplay, 1, m)
+                byAddr[addr] = (m.senderDisplay, 1, m, hasUnsub ? m : nil)
             }
         }
         return byAddr.map { addr, v in
             NewsletterSender(id: addr, name: v.name, address: addr, count: v.count,
                              unsubscribeURL: nil, latestMessageID: v.latest.messageID,
-                             latestRowID: v.latest.id)
+                             latestRowID: v.latest.id, unsubscribeRowID: v.unsub?.id)
         }
         .sorted { $0.count > $1.count }
     }

@@ -86,7 +86,7 @@ enum SubscriptionDetector {
         if isNonSubscriptionEmail(subject: lowerSubject, snippet: m.snippet) { return nil }
 
         let merchant = MerchantCatalog.match(
-            senderAddress: m.senderAddress, senderName: m.senderName, subject: subject
+            senderAddress: m.senderAddress, senderName: m.senderName, subject: subject, body: m.snippet
         )
 
         let looksBilling = isBillingSubject(lowerSubject)
