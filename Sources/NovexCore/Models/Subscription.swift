@@ -154,14 +154,17 @@ public struct MoneyRadarReport: Equatable, Sendable {
         subscriptions.filter(\.isTrialConverting)
     }
 
-    /// Currency for the headline total — the one we actually SPEND the most in
-    /// (by yearly value, not by count), so the number is meaningful. Defaults
-    /// to USD.
+    /// Currency for the headline total — the one MOST of your subscriptions use.
+    /// (Must NOT compare raw cross-currency sums: ₹3,588 > $186 numerically would
+    /// wrongly pick INR and drop the bigger real spend. Count is FX-free and safe.)
+    /// Ties broken by higher total. Defaults to USD.
     public var primaryCurrency: String {
-        let totals = Dictionary(grouping: subscriptions.filter { $0.yearlyCost > 0 },
-                                by: \.currencyCode)
-            .mapValues { $0.reduce(0.0) { $0 + $1.yearlyCost } }
-        return totals.max(by: { $0.value < $1.value })?.key ?? "USD"
+        let priced = subscriptions.filter { $0.yearlyCost > 0 }
+        let byCurrency = Dictionary(grouping: priced, by: \.currencyCode)
+        return byCurrency.max(by: { a, b in
+            if a.value.count != b.value.count { return a.value.count < b.value.count }
+            return a.value.reduce(0){$0+$1.yearlyCost} < b.value.reduce(0){$0+$1.yearlyCost}
+        })?.key ?? "USD"
     }
 
     /// True when subscriptions span more than one currency — the headline total

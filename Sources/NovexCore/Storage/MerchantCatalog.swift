@@ -34,7 +34,7 @@ enum MerchantCatalog {
         .init(key: "hulu", displayName: "Hulu", category: .streaming,
               domains: ["hulu.com"], nameTokens: ["hulu"], typicalMonthlyUSD: 17.99, defaultCycle: .monthly),
         .init(key: "max", displayName: "Max (HBO)", category: .streaming,
-              domains: ["max.com", "hbomax.com"], nameTokens: ["hbo max", "max "], typicalMonthlyUSD: 16.99, defaultCycle: .monthly),
+              domains: ["max.com", "hbomax.com"], nameTokens: ["hbo max", "hbomax"], typicalMonthlyUSD: 16.99, defaultCycle: .monthly),
         .init(key: "paramountplus", displayName: "Paramount+", category: .streaming,
               domains: ["paramountplus.com"], nameTokens: ["paramount+"], typicalMonthlyUSD: 12.99, defaultCycle: .monthly),
         .init(key: "peacock", displayName: "Peacock", category: .streaming,

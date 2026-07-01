@@ -63,6 +63,7 @@ final class FollowUpService {
         myAddresses = Set(visible
             .filter { MailReader.isSentMailbox($0.mailbox) }
             .compactMap { $0.senderAddress?.lowercased() })
+            .union(OwnerIdentity.addresses)   // Gmail Sent lives under All Mail → union so "You" is tagged right
         // Share "who am I" with the rest of the app — the briefing uses it to
         // recognize notes-to-self and never draft a reply back to you.
         OwnerIdentity.learn(myAddresses)
@@ -126,10 +127,14 @@ final class FollowUpService {
             let counterpartName = counterpart?.senderDisplay ?? "—"
 
             if isMine(latest) {
-                // You spoke last → waiting on them.
-                guard age >= waitMinAge, age <= waitMaxAge else { continue }
+                // You spoke last → waiting on them — but only for a REAL two-way
+                // thread. Skip self-only notes (no other party → blank "—" rows) and
+                // broadcasts / newsletters / bots you happened to reply to (you're
+                // not awaiting a reply from an announcement).
+                guard age >= waitMinAge, age <= waitMaxAge,
+                      let cp = counterpart, wantsReply(cp) else { continue }
                 waitingOn.append(FollowUpItem(message: latest,
-                                              counterpartName: counterpartName,
+                                              counterpartName: cp.senderDisplay,
                                               kind: .waitingOn))
             } else {
                 // They spoke last → needs your reply (if it actually wants one).
@@ -153,9 +158,10 @@ final class FollowUpService {
     /// Whether an incoming email plausibly wants a human reply (vs a newsletter,
     /// promo, or no-reply robot we'd never answer).
     nonisolated static func wantsReply(_ m: MailMessage) -> Bool {
-        if m.automatedType >= 2 { return false }       // automated conversation
-        if m.unsubscribeType > 0 { return false }       // newsletter / bulk
-        if m.isNotificationSender { return false }       // no-reply / 2FA / "via Slack" bots
+        if m.automatedType >= 2 { return false }         // automated conversation
+        if m.unsubscribeType > 0 { return false }         // newsletter / bulk
+        if m.isNotificationSender { return false }         // no-reply / 2FA / "via Slack" bots
+        if m.isEphemeralNotification { return false }      // code / password / terms / social FYI
         return true
     }
 }

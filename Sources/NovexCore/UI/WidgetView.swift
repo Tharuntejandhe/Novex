@@ -283,7 +283,7 @@ struct WidgetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 13, style: .continuous).fill(Color.white.opacity(0.06)))
             HStack(spacing: 8) {
-                if m.isReplyable {
+                if m.isReplyable && !m.isFromSelf(OwnerIdentity.addresses) && !m.isEphemeralNotification {
                     focusPill("Reply", filled: true) { LearnStore.recordOpen(m.senderAddress); replyTarget = m }
                 }
                 if let url = mailURLFor(m.messageID ?? "") {

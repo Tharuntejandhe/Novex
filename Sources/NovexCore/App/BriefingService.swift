@@ -98,7 +98,7 @@ final class BriefingService {
         let messages = (try? await readRecent(limit: 400, hoursAgo: 30 * 24, includeBodies: false))
             ?? lastMessagesSnapshot
         upNext = events.map { ev in
-            let emails = Set(ev.participantEmails.map { $0.lowercased() })
+            let emails = Set(ev.participantEmails.map { $0.lowercased() }).subtracting(OwnerIdentity.addresses)
             let match = emails.isEmpty ? nil : messages
                 .filter { ($0.senderAddress?.lowercased()).map(emails.contains) == true }
                 .max(by: { $0.dateReceived < $1.dateReceived })
@@ -254,7 +254,11 @@ final class BriefingService {
         // still cold (a brand-new user matches nothing), fall back to the most
         // recent newsletters — favoring non-promotional ones — so Discover is
         // useful from day one instead of looking permanently empty.
+        // The quality gate applies to BOTH paths — otherwise a promo that overlaps
+        // a learned interest ("50% off cloud storage" vs interest "cloud") sneaks
+        // in through the matched path and even into the wake greeting.
         let matched = newsletters
+            .filter(Self.looksLikeQualityRead)
             .map { (m: $0, s: OwnerModel.score($0)) }
             .filter { $0.s > 0 }
             .sorted { ($0.s, $0.m.dateReceived) > ($1.s, $1.m.dateReceived) }
@@ -883,7 +887,7 @@ final class BriefingService {
         // local, on-device app can join your Mail and Calendar privately.
         await CalendarService.shared.refresh()
         upNext = CalendarService.shared.upcoming.map { ev in
-            let emails = Set(ev.participantEmails.map { $0.lowercased() })
+            let emails = Set(ev.participantEmails.map { $0.lowercased() }).subtracting(OwnerIdentity.addresses)
             let match = emails.isEmpty ? nil : messages
                 .filter { ($0.senderAddress?.lowercased()).map(emails.contains) == true }
                 .max(by: { $0.dateReceived < $1.dateReceived })
@@ -1149,6 +1153,8 @@ final class BriefingService {
         // bots, so it's not spammy. VIPs always notify. Baseline on first load.
         let notifyCandidates = active.filter {
             guard !$0.isRead else { return false }
+            // Never peek a note-to-self or a routine notification (2FA code, etc.).
+            if $0.isFromSelf(mine) || $0.isEphemeralNotification { return false }
             if VIPStore.isVIP($0.senderAddress) { return true }
             return !$0.isNotificationSender && $0.unsubscribeType == 0
         }

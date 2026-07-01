@@ -857,6 +857,44 @@ group("routine notifications vs real actions (the Facebook/overdue bug)") {
                "policy update → read, never confirm")
 }
 
+group("tab-sweep fixes (follow-up / money / cleanup)") {
+    func mk(_ id: Int64, _ sender: String, _ subject: String, snip: String = "",
+            automated: Int = 0, unsub: Int = 0, cat: Int = 0, name: String? = nil) -> MailMessage {
+        MailMessage(id: id, dateReceived: Date(timeIntervalSinceReferenceDate: 100 * 86_400),
+                    isRead: false, isFlagged: false, subject: subject, senderName: name,
+                    senderAddress: sender, mailbox: "imap://u@h/INBOX", messageID: "<t\(id)@x>",
+                    snippet: snip, isUrgent: false, automatedType: automated, unsubscribeType: unsub,
+                    isHighImpact: false, needsFollowUp: false, category: cat)
+    }
+    // Follow-up: an ephemeral notice never "wants a reply".
+    check(!FollowUpService.wantsReply(mk(1, "notification@facebookmail.com", "239768 is your Facebook code")),
+          "follow-up: 2FA code never wants a reply")
+    check(FollowUpService.wantsReply(mk(2, "raj@gmail.com", "can you review the doc?")),
+          "follow-up: a real person's question still wants a reply")
+
+    // Money: "will be charged" is a renewal, not a trial-converting signal.
+    check(!SubscriptionDetector.isTrialEnding("your subscription will be charged $15 on jun 6"),
+          "money: 'will be charged' renewal is NOT flagged as a converting trial")
+    check(SubscriptionDetector.isTrialEnding("your free trial ends tomorrow"),
+          "money: a real trial-ending is still detected")
+
+    // Money: a person named "Max" is not an HBO Max subscription.
+    let maxMatch = MerchantCatalog.match(senderAddress: "max@chen.com", senderName: "Max Chen", subject: "Re: the invoice")
+    check(maxMatch?.key != "max", "money: 'Max Chen' is not mis-matched to HBO Max")
+
+    // Money: a one-off PayPal payment is not a recurring subscription.
+    check(SubscriptionDetector.detect(from: [mk(3, "service@paypal.com", "Receipt for your payment to John's Store", snip: "You paid $45.00 to John's Store.")], now: Date()).isEmpty,
+          "money: one-time PayPal payment is not listed as a subscription")
+
+    // Cleanup: transactional + ephemeral are never 'clutter' (muting must not hide them).
+    check(!DeclutterService.isNewsletter(mk(4, "no-reply@bank.com", "Your account statement", automated: 2, cat: 1)),
+          "cleanup: a transactional bank statement is NOT clutter")
+    check(!DeclutterService.isNewsletter(mk(5, "notification@facebookmail.com", "Your login code is 123456", automated: 2)),
+          "cleanup: a 2FA code is NOT clutter")
+    check(DeclutterService.isNewsletter(mk(6, "news@promos.com", "50% off everything", automated: 2, unsub: 7)),
+          "cleanup: a marketing newsletter IS clutter")
+}
+
 // MARK: - Summary
 
 print("\n――――――――――――――――――――")

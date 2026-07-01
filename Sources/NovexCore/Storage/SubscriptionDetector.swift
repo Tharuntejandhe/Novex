@@ -108,11 +108,16 @@ enum SubscriptionDetector {
         if amount == nil, let snip = m.snippet, !snip.isEmpty {
             (amount, currency) = parseAmount(from: snip)
         }
+        // Parse the billing cycle from subject AND body: an annual receipt often
+        // says "annual"/"1 year" only in the body, so subject-only parsing let
+        // annuals fall back to monthly → a 12× inflated yearly total.
+        let cycleText = lowerSubject + " " + (m.snippet ?? "").lowercased()
+
         // PLAUSIBILITY: a parsed amount that's absurd for a *personal*
         // subscription (e.g. ₹1,94,653 lifted from an invoice total) is a parse
         // error. Discard it and let the catalog estimate stand in instead.
         if let a = amount,
-           !isPlausibleAmount(a, currency: currency, cycleHint: parseCycle(from: lowerSubject)) {
+           !isPlausibleAmount(a, currency: currency, cycleHint: parseCycle(from: cycleText)) {
             amount = nil
             currency = nil
         }
@@ -129,6 +134,16 @@ enum SubscriptionDetector {
             || isTrialEnding(lowerSubject)
         guard qualifies else { return nil }
 
+        // A payment PROCESSOR (PayPal/etc, no typical price of its own) is not a
+        // subscription — a one-off "Receipt for your payment to John's Store" must
+        // not be listed. Require an explicit recurrence signal for these.
+        if merchant.typicalMonthlyUSD == nil {
+            let recurs = ["subscription", "recurring", "renew", "auto-renew",
+                          "automatic payment", "membership", "/mo", "/month", "/yr",
+                          "per month", "per year", "billing cycle", "next billing"]
+            guard recurs.contains(where: { cycleText.contains($0) }) else { return nil }
+        }
+
         return Candidate(
             merchantKey: merchant.key,
             displayName: merchant.displayName,
@@ -137,7 +152,7 @@ enum SubscriptionDetector {
             amount: amount,
             currencyCode: currency,
             amountSource: amount == nil ? .unknown : .parsedFromEmail,
-            cycleHint: parseCycle(from: lowerSubject),
+            cycleHint: parseCycle(from: cycleText),
             isTrial: isTrialEnding(lowerSubject),
             nextRenewal: parseRenewalDate(from: subject, relativeTo: m.dateReceived),
             messageID: m.messageID,
@@ -168,7 +183,7 @@ enum SubscriptionDetector {
         // For an unknown sender, only keep it if we parsed a PLAUSIBLE amount —
         // no amount, or an absurd one, is too speculative to call a subscription.
         guard let a = amount,
-              isPlausibleAmount(a, currency: currency, cycleHint: parseCycle(from: m.subject.lowercased()))
+              isPlausibleAmount(a, currency: currency, cycleHint: parseCycle(from: lower))
         else { return nil }
         let name = m.senderName?.isEmpty == false
             ? m.senderName!
@@ -182,7 +197,7 @@ enum SubscriptionDetector {
             amount: amount,
             currencyCode: currency,
             amountSource: .parsedFromEmail,
-            cycleHint: parseCycle(from: m.subject.lowercased()),
+            cycleHint: parseCycle(from: lower),
             isTrial: isTrialEnding(m.subject.lowercased()),
             nextRenewal: parseRenewalDate(from: m.subject, relativeTo: m.dateReceived),
             messageID: m.messageID,
@@ -365,12 +380,14 @@ enum SubscriptionDetector {
                             "get started with a free trial", "claim your free trial"]
         if startInvites.contains(where: { lowerSubject.contains($0) }) { return false }
 
+        // NOTE: no "will be charged" — that's a NORMAL renewal notice, not a trial
+        // converting; it was flagging every renewal as an "act now" trial.
         let trialEnding = [
             "trial ends", "trial ending", "trial is ending", "trial will end",
             "trial expires", "trial expiring", "trial has ended", "trial ended",
             "end of your trial", "end of your free trial", "trial is about to",
             "last day of your", "your trial is", "before your trial",
-            "convert to a paid", "convert to paid", "will be charged",
+            "convert to a paid", "convert to paid",
         ]
         return trialEnding.contains { lowerSubject.contains($0) }
     }
