@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage("updateCheckEnabled") private var updateCheckEnabled = true
     @AppStorage("ownerName") private var ownerName = ""
     @AppStorage("ownerEmail") private var ownerEmail = ""
+    @State private var launchAtLogin = LoginItem.isEnabled
+    @State private var perfMode = PerfMode.current
     /// Bumped to re-read the (non-observable) VIP/Mute stores after an edit.
     @State private var rev = 0
     @State private var interestInput = ""
@@ -24,6 +26,8 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     nameRow
                     interestsSection
+                    launchRow
+                    perfRow
                     digestRow
                     animationRow
                     updateRow
@@ -116,6 +120,50 @@ struct SettingsView: View {
     }
 
     // MARK: - Notification animation
+
+    private var launchRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "power")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Launch at login").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text(LoginItem.needsApproval
+                     ? "Approve Novex under Login Items in System Settings"
+                     : "Start Novex automatically when you log in")
+                    .font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+            }
+            Spacer()
+            togglePill(on: launchAtLogin) {
+                LoginItem.setEnabled(!launchAtLogin)
+                launchAtLogin = LoginItem.isEnabled
+            }
+        }
+    }
+
+    private var perfRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "gauge.with.dots.needle.67percent")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Performance").font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text(perfMode.detail).font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
+            }
+            Spacer()
+            HStack(spacing: 4) {
+                ForEach(PerfMode.allCases, id: \.self) { m in
+                    Text(m.label)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(perfMode == m ? .black.opacity(0.85) : .white.opacity(0.7))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(perfMode == m ? Color.cyan.opacity(0.8) : Color.white.opacity(0.10)))
+                        .appKitTap { PerfMode.set(m); perfMode = m; rev += 1 }
+                }
+            }
+        }
+    }
 
     private var animationRow: some View {
         HStack(spacing: 10) {

@@ -396,6 +396,8 @@ final class BriefingService {
     /// background, so it's waiting for the user. Cached by Message-ID — only
     /// regenerates when the top reply item actually changes (battery).
     func prepareTopReplyDraft(items: [BriefingItem]) async {
+        // Skip the expensive background pre-draft when we're conserving power.
+        guard PerfProfile.resolve().allowBackgroundLLM else { return }
         guard let item = items.first(where: { $0.action == .reply && $0.messageID != nil }),
               let mid = item.messageID,
               let m = lastMessagesSnapshot.first(where: { $0.messageID == mid }),
@@ -610,7 +612,9 @@ final class BriefingService {
         heartbeatTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self.heartbeatInterval * 1_000_000_000))
+                // Re-resolve each cycle so cadence adapts LIVE to power state
+                // (unplug the laptop → it quietly backs off).
+                try? await Task.sleep(nanoseconds: UInt64(PerfProfile.resolve().heartbeat * 1_000_000_000))
                 if Task.isCancelled { break }
                 await self.refreshIfStoreChanged()
             }
@@ -683,7 +687,7 @@ final class BriefingService {
         refreshTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(self.refreshInterval * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(PerfProfile.resolve().poll * 1_000_000_000))
                 if Task.isCancelled { break }
                 await self.refresh()
             }
