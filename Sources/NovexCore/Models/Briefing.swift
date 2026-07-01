@@ -101,6 +101,9 @@ struct MailMessage: Identifiable, Hashable, Sendable {
     /// signals miss. nil if none. NOTE: regex-based, so callers compute it ONCE
     /// per message (never inside `importanceScore`, which is hot in sorts).
     var detectedDeadline: Date? {
+        // A routine notification's date is never a to-do deadline (a policy's
+        // "effective by <date>", a code's expiry) — don't stamp it "due"/"overdue".
+        if isEphemeralNotification { return nil }
         let text = subject + ". " + (snippet ?? "")
         guard !text.isEmpty,
               let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue)
@@ -134,20 +137,32 @@ struct MailMessage: Identifiable, Hashable, Sendable {
     /// deadline overrides this — see the callers.)
     var isEphemeralNotification: Bool {
         let t = (subject + " " + (snippet ?? "")).lowercased()
+        // One-time CODES — match by pattern, not exact phrase, so "239768 is your
+        // Facebook code" and "your login code is 481920" are both caught.
+        if t.contains("code"),
+           t.contains("your") || t.contains("verification") || t.contains("login")
+           || t.contains("security") || t.contains("one-time") || t.contains("otp")
+           || t.contains("sign-in") || t.contains("sign in") || t.contains("2fa") {
+            return true
+        }
         let markers = [
-            // one-time codes / OTP
-            "verification code", "login code", "security code", "one-time", "one time",
-            "otp", "your code is", "confirmation code", "access code", "2fa code",
-            "recovery code", "authentication code", "single-use code",
-            // routine security / account FYIs
-            "password change", "password was changed", "password reset", "changed your password",
-            "new login", "new sign-in", "new sign in", "was accessed", "unusual activity",
-            "suspicious login", "we noticed a", "account verification", "verify your account",
+            // security / account FYIs — informational, nothing to DO
+            "password change", "password was changed", "password has been changed",
+            "password reset", "changed your password", "new login", "new sign-in",
+            "new sign in", "just log in", "did you just", "log in near", "sign-in attempt",
+            "new device", "was accessed", "unusual activity", "suspicious", "we noticed",
+            "recognize this", "account verification", "verify your account",
             "your account was", "successfully logged",
+            // terms / policy / privacy UPDATES — a notice, not a task (grabbed a false
+            // "effective by <date>" deadline before)
+            "terms of service", "terms and conditions", "privacy policy", "policy update",
+            "policy change", "updates to our", "changes to our", "update our terms",
+            "updated our terms", "updated terms", "we're updating", "we are updating",
+            "changes to the terms", "update to our", "changes to your terms",
             // social pings
             "posted an update", "commented on", "liked your", "mentioned you",
             "friend request", "tagged you", "started following", "reacted to",
-            "sent you a message request", "wants to connect",
+            "sent you a message request", "wants to connect", "new follower",
         ]
         return markers.contains { t.contains($0) }
     }
@@ -214,8 +229,9 @@ struct MailMessage: Identifiable, Hashable, Sendable {
     /// hot path) — pass `detectedDeadline` once per message.
     func deterministicAction(mine: Set<String>, deadline: Date?) -> AIAction {
         if isFromSelf(mine) { return .none }
-        // Routine notification with no real deadline → FYI, never confirm/review.
-        if isEphemeralNotification && deadline == nil { return isRead ? .none : .read }
+        // Routine notification (code / security alert / terms update / social) → FYI,
+        // never an action to confirm/review, period.
+        if isEphemeralNotification { return isRead ? .none : .read }
         let text = (subject + " " + (snippet ?? "")).lowercased()
         func has(_ words: [String]) -> Bool { words.contains { text.contains($0) } }
 

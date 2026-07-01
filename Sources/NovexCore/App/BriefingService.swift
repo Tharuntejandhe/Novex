@@ -967,9 +967,10 @@ final class BriefingService {
             let m = g.message
             guard !m.isFromSelf(mine),
                   !(m.messageID.map(dismissed.contains) ?? false),   // you marked it done
-                  // Routine notification (2FA code / password-changed / social) with
-                  // no real deadline is FYI — never "needs you", however Apple flags it.
-                  !(m.isEphemeralNotification && deadlineByID[m.id] == nil),
+                  // Routine notification (2FA code / password-changed / login alert /
+                  // terms-update / social) is FYI — never "needs you", however
+                  // high-impact Apple flags it. Absolute, deadline or not.
+                  !m.isEphemeralNotification,
                   rank(m) >= 30 else { return false }
             if !m.isRead { return true }
             if m.isFlagged || VIPStore.isVIP(m.senderAddress) { return true }

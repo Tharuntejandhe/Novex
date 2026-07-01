@@ -840,6 +840,21 @@ group("routine notifications vs real actions (the Facebook/overdue bug)") {
                   sender: "no-reply@paypal.com")
     check(pay.detectedDeadline != nil, "'verify ... by <date>' IS a real deadline")
     check(!pay.isEphemeralNotification, "identity-verify with a deadline is a real action, not FYI")
+
+    // Exact real-world cases from the screenshot that slipped through before:
+    check(msg(6, "239768 is your Facebook code", "239768 is your Facebook code. It expires soon.").isEphemeralNotification,
+          "'<number> is your Facebook code' caught by pattern (not just 'login code')")
+    check(msg(7, "Your password has been changed", "Your Facebook password has been changed.").isEphemeralNotification,
+          "'password has been changed' is FYI")
+    check(msg(8, "Did you just log in near Pimpri on a new device?", "We noticed a new login near Pimpri.").isEphemeralNotification,
+          "login-location alert is FYI")
+    // A terms/policy update with an 'effective by <date>' must NOT become a deadline action.
+    let policy = msg(9, "Updates to Render's Privacy Policy and Terms",
+                     "These changes take effect by July 10, 2026.", sender: "no-reply@render.com")
+    check(policy.isEphemeralNotification, "terms/privacy-policy update is FYI")
+    check(policy.detectedDeadline == nil, "a policy 'effective by <date>' is NOT a to-do deadline")
+    checkEqual(policy.deterministicAction(mine: none, deadline: policy.detectedDeadline), AIAction.read,
+               "policy update → read, never confirm")
 }
 
 // MARK: - Summary
