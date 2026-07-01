@@ -210,25 +210,25 @@ struct WidgetView: View {
     // MARK: - Mode picker (Inbox / Money)
 
     private var modePicker: some View {
-        // Horizontal scroll so the tab row never clips as features are added.
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                modeChip(.inbox, label: "Inbox", icon: "tray.full")
-                modeChip(.followups, label: "Follow-ups", icon: "arrow.triangle.2.circlepath")
-                modeChip(.cleanup, label: "Cleanup", icon: "sparkles")
-                modeChip(.money, label: "Money", icon: "dollarsign.circle")
-            }
+        // All four tabs must FIT (no scroll-clip — a hidden "Money" tab is a bug),
+        // so this is a tight, evenly-spread row, not a scroll view.
+        HStack(spacing: 3) {
+            modeChip(.inbox, label: "Inbox", icon: "tray.full")
+            modeChip(.followups, label: "Follow-ups", icon: "arrow.triangle.2.circlepath")
+            modeChip(.cleanup, label: "Cleanup", icon: "sparkles")
+            modeChip(.money, label: "Money", icon: "dollarsign.circle")
+            Spacer(minLength: 0)
         }
     }
 
     private func modeChip(_ m: Mode, label: String, icon: String) -> some View {
         let selected = mode == m
-        return HStack(spacing: 4) {
-            Image(systemName: icon).font(.system(size: 10, weight: .semibold))
-            Text(label).font(.system(size: 11, weight: .semibold))
+        return HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 9.5, weight: .semibold))
+            Text(label).font(.system(size: 10.5, weight: .semibold)).fixedSize()
         }
         .foregroundStyle(.white.opacity(selected ? 0.95 : 0.5))
-        .padding(.horizontal, 9).padding(.vertical, 4)
+        .padding(.horizontal, 7).padding(.vertical, 4)
         .background(
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(Color.white.opacity(selected ? 0.14 : 0.0))

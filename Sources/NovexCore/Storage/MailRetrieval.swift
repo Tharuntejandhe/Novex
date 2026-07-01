@@ -16,6 +16,13 @@ enum MailRetrieval {
         "any", "some", "all", "can", "could", "would", "should", "will",
         "tell", "show", "find", "get", "say", "said", "email", "emails", "mail",
         "message", "messages", "inbox", "anything",
+        // Contraction fragments left by apostrophe-splitting ("I'll" → "ll"),
+        // and generic greeting/filler that pollute learned interests.
+        "ll", "ve", "re", "im", "ive", "id", "don", "doesn", "isn", "wasn",
+        "aren", "won", "didn", "couldn", "wouldn", "shouldn", "hasn", "haven",
+        "hi", "hello", "hey", "thanks", "thank", "please", "regards", "dear",
+        "just", "also", "let", "know", "here", "there", "now", "new", "one",
+        "keep", "info", "need", "want", "required", "account", "different",
     ]
 
     /// Lowercase, split on non-alphanumerics, drop stopwords and 1-char tokens.

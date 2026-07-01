@@ -155,6 +155,7 @@ struct SettingsView: View {
                 ForEach(PerfMode.allCases, id: \.self) { m in
                     Text(m.label)
                         .font(.system(size: 10, weight: .semibold))
+                        .fixedSize()   // never wrap "Auto"→"Aut/o" or "Saver"→"Save/r"
                         .foregroundStyle(perfMode == m ? .black.opacity(0.85) : .white.opacity(0.7))
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(RoundedRectangle(cornerRadius: 6, style: .continuous)

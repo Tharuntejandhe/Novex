@@ -31,8 +31,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // (the Blip-style "flip" reveal) that pairs with the dot dissolving into
         // the icon. NSHostingController hosts the SwiftUI panel; all its controls
         // are AppKit taps so there's no SwiftUI Button gesture to crash.
-        popover.contentSize = NSSize(width: 320, height: 470)
-        popover.behavior = .transient
+        popover.contentSize = NSSize(width: 348, height: 470)
+        // Normally transient (click-away closes it). For headless screenshots we
+        // pin it open so it survives the app losing focus to the capture process.
+        popover.behavior = UserDefaults.standard.bool(forKey: "NOVEX_DEBUG_SHOW_POPOVER")
+            ? .applicationDefined : .transient
         popover.animates = true
         popover.contentViewController = NSHostingController(rootView: NovexMenuBarPanel())
 
@@ -191,7 +194,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     func debugShowPopoverIfRequested() {
         guard UserDefaults.standard.bool(forKey: "NOVEX_DEBUG_SHOW_POPOVER") else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            NSApp.activate(ignoringOtherApps: true)   // bring the popover on top for capture
             self?.togglePopover(nil)
+            self?.popover.contentViewController?.view.window?.orderFrontRegardless()
             if let q = UserDefaults.standard.string(forKey: "NOVEX_DEBUG_ASK"), !q.isEmpty {
                 Task { @MainActor in await BriefingService.shared.answerQuestion(q) }
             }
