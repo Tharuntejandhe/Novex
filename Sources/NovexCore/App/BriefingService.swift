@@ -158,19 +158,36 @@ final class BriefingService {
         } else {
             let now = Date()
             let rel = RelativeDateTimeFormatter()
+            let mine = OwnerIdentity.addresses
             context = grounded.sorted { $0.dateReceived > $1.dateReceived }.prefix(12).map { m in
                 let when = rel.localizedString(for: m.dateReceived, relativeTo: now)
-                let tag = m.isRead ? "" : " UNREAD"
+                let read = m.isRead ? "" : " UNREAD"
                 let sender = PromptSafety.sanitize(m.senderDisplay, maxChars: 48)
                 let subject = PromptSafety.sanitize(String(m.subject.prefix(90)), maxChars: 90)
                 let snip = PromptSafety.sanitize(String((m.snippet ?? "").prefix(110)), maxChars: 110)
-                return "- (\(when))\(tag) \(sender): \(subject)" + (snip.isEmpty ? "" : " — \(snip)")
+                // Tag each mail with the SAME classification the briefing uses, so the
+                // model knows a code / login notice / newsletter is FYI, not a to-do.
+                let kind: String
+                if m.isFromSelf(mine) { kind = " [your own note]" }
+                else if m.isEphemeralNotification { kind = " [FYI, no action]" }
+                else {
+                    switch m.deterministicAction(mine: mine, deadline: m.detectedDeadline) {
+                    case .reply:   kind = " [needs a reply]"
+                    case .pay:     kind = " [bill to pay]"
+                    case .confirm: kind = " [action needed]"
+                    case .review:  kind = " [to review]"
+                    default:       kind = m.unsubscribeType > 0 ? " [newsletter]" : ""
+                    }
+                }
+                return "- (\(when))\(read)\(kind) \(sender): \(subject)" + (snip.isEmpty ? "" : " — \(snip)")
             }.joined(separator: "\n")
         }
 
         let honesty = hasRealMatch ? "" : "\n\nIMPORTANT: nothing in the emails below clearly matches what they asked about. If you can't find it, say plainly that you don't see anything about that in their recent mail — do NOT answer from unrelated emails."
         let instructions = """
-        You are Novex, the user's warm, concise personal assistant. Reply in 1–2 SHORT sentences, in your OWN words, like a friend who skimmed their inbox. NEVER paste, quote, or list email contents; NEVER use bullet points, headers, greetings, or rows of asterisks — just talk naturally. Use sender names and timing when helpful. If it isn't in the data, say so briefly. Don't invent senders or subjects.\(honesty)
+        You are Novex, the user's warm, concise personal assistant. Reply in 1–2 SHORT sentences, in your OWN words, like a friend who skimmed their inbox. NEVER paste, quote, or list email contents; NEVER use bullet points, headers, greetings, or rows of asterisks — just talk naturally. Use sender names and timing when helpful. Don't invent senders or subjects.
+
+        Each email is tagged. [FYI, no action], [newsletter], and [your own note] are INFORMATIONAL — a login/security code, a "password changed" notice, a receipt, a newsletter. NEVER tell the user they "need" to do anything about those. Only [needs a reply], [bill to pay], [action needed], and [to review] actually need the user. If the question is "what needs me?" and none of those are present, say plainly that nothing needs them and mention it's mostly notifications/newsletters.\(honesty)
 
         \(PromptSafety.securityClause)
         """
