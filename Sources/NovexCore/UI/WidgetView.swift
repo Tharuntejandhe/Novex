@@ -382,15 +382,9 @@ struct WidgetView: View {
             Image(systemName: "sparkle").font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.cyan.opacity(0.8)).padding(.top, 3)
             if let answer = turn.answer {
-                Text(answer)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.white.opacity(0.92))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                TypingText(text: answer)
             } else {
-                Text("Thinking…")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(.white.opacity(0.4))
+                TypingDots().padding(.top, 4)
             }
         }
         .padding(.trailing, 24)
