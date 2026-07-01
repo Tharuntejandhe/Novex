@@ -439,9 +439,19 @@ final class BriefingService {
         let content = PromptSafety.sanitize(m.contentForModel)
 
         let instructions = """
-        You are Novex, drafting a reply ON BEHALF OF the user to an email they received. Output ONLY the reply body — no subject line, no "Dear ...", no signature, no placeholders like [Your name]. Write as a real person would: \(tone.guidance)
+        You are drafting the USER's reply to an email they received. Output ONLY the reply body — no subject line, no signature, no "[Your name]" placeholder.
 
-        Never invent facts, commitments, dates, prices, or attachments the user did not state. If the email asks something you cannot answer for them, write a brief, friendly holding reply that acknowledges it and says they'll follow up.
+        Write it the way a busy real person actually replies:
+        - SHORT. 1 to 3 sentences. Match how briefly they wrote. No padding.
+        - Answer every specific thing they asked, directly (a new time, a yes/no, a document).
+        - Plain and warm, not formal or corporate. \(tone.guidance)
+
+        Do NOT:
+        - apologize for things they did not complain about ("sorry to hear about the issue")
+        - thank them for understanding, or add filler pleasantries
+        - invent facts, feelings, commitments, dates, prices, or attachments the user never stated
+
+        If you cannot answer something for the user, acknowledge it in one line and say they will follow up. A brief "Hi <first name>," opener is fine; a long greeting is not.
 
         \(PromptSafety.securityClause)
         """
@@ -640,6 +650,7 @@ final class BriefingService {
         MailSync.note("heartbeat: inbox changed (sig \(sig)) → refresh")
         await refresh()
     }
+
 
     // MARK: - Power-aware lifecycle
 
@@ -1182,6 +1193,7 @@ final class BriefingService {
         4. Drop newsletters and obvious promos unless they have a deadline.
         5. Plain text only. No quotes, no markdown, no greetings like "Hi" or "Good morning".
         6. Every item MUST include "index": the number of the email it refers to from the numbered list. Never invent an index that isn't in the list, and never reuse the same index twice.
+        7. The "title" says WHAT THE SENDER WANTS or the action to take, in your own words — NOT the sender's name (that goes in "detail"), NOT the raw subject. e.g. for a reschedule request → "Move the call to Friday"; for a $240 invoice → "Pay the $240 invoice"; for "verify by Jul 14" → "Verify identity by Jul 14".
 
         \(PromptSafety.securityClause)
         """
@@ -1192,8 +1204,8 @@ final class BriefingService {
           "items": [
             {
               "index": 3,
-              "title": "rewritten short label for the email, max 8 words, NOT identical to the original subject",
-              "detail": "sender name, max 6 words",
+              "title": "what the sender wants / the action to take, your own words, max 7 words — NOT the sender name, NOT the raw subject",
+              "detail": "sender name only, max 5 words",
               "category": "work | finance | social | promo | personal | security | calendar | other",
               "priority": "high | medium | low",
               "action": "reply | pay | confirm | read | review | ignore | none"
