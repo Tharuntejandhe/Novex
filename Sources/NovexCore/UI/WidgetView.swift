@@ -901,19 +901,19 @@ struct WidgetView: View {
     /// passive list. Each one runs the on-device Q&A.
     private var suggestionBar: some View {
         let suggestions: [(icon: String, label: String, prompt: String)] = [
-            ("sparkles", "What needs me?", "What needs me today?"),
+            ("sparkles", "Needs me?", "What needs me today?"),
             ("text.line.first.and.arrowtriangle.forward", "Catch me up", "Catch me up on my inbox in 3 short lines."),
             ("creditcard", "Bills due?", "Do I have any bills, payments, or renewals coming up?"),
         ]
         return ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 ForEach(suggestions, id: \.label) { s in
                     HStack(spacing: 4) {
                         Image(systemName: s.icon).font(.system(size: 9, weight: .semibold))
-                        Text(s.label).font(.system(size: 10.5, weight: .medium))
+                        Text(s.label).font(.system(size: 10.5, weight: .medium)).fixedSize()
                     }
                     .foregroundStyle(.white.opacity(0.72))
-                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(Capsule().fill(Color.white.opacity(0.08)))
                     .appKitTap {
                         if s.label == "Catch me up" { showDigest = true }

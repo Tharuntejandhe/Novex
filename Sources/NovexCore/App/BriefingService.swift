@@ -698,8 +698,10 @@ final class BriefingService {
     /// occlusion flip (e.g. a window briefly covering the widget) doesn't
     /// trigger needless work.
     private func refreshIfStale(maxAge: TimeInterval = 60) async {
+        // Fired when the panel becomes visible → the user is here, so it's OK to
+        // nudge Mail open to freshen the sync.
         if Date().timeIntervalSince(briefing.generatedAt) > maxAge {
-            await refresh()
+            await refresh(foreground: true)
         }
     }
 
@@ -800,7 +802,10 @@ final class BriefingService {
         }.value
     }
 
-    func refresh() async {
+    /// `foreground` = the user is actively looking (opened the panel). Only then
+    /// do we auto-open Mail to sync — a BACKGROUND poll must never reopen Mail the
+    /// user deliberately quit (that was the "Mail keeps opening by itself" bug).
+    func refresh(foreground: Bool = false) async {
         // Don't interrupt a question the user is currently asking — let the next
         // tick pick up fresh mail.
         if isAnswering { return }
@@ -822,10 +827,13 @@ final class BriefingService {
         }
         MailSync.log("refresh: guards passed, ensuring Mail runs")
 
-        // Make sure Mail is running (launched hidden if needed) so it keeps
-        // syncing into the local store. If we just launched it, give its first
-        // fetch a moment to land before we read.
-        let launched = await MailSync.launchMailHiddenIfNeeded()
+        // Only nudge Mail open when the user is actively looking (foreground). We
+        // read the on-device store either way — if Mail is closed, we just show
+        // what last synced instead of forcing it open behind the user's back.
+        var launched = false
+        if foreground {
+            launched = await MailSync.launchMailHiddenIfNeeded()
+        }
 
         if !hasEverLoaded { state = .loading }
 
@@ -903,20 +911,30 @@ final class BriefingService {
         let mine = OwnerIdentity.addresses
 
         let vips = VIPStore.all()
+
+        // Detected deadlines, computed ONCE per message (regex — too slow for the
+        // ranker's hot path). Only genuine "by <date>"-style deadlines survive.
+        let deadlineByID: [Int64: Date] = Dictionary(
+            active.compactMap { msg in msg.detectedDeadline.map { (msg.id, $0) } },
+            uniquingKeysWith: { a, _ in a })
+        func pendingDeadline(_ m: MailMessage) -> Bool {
+            guard let d = deadlineByID[m.id] else { return false }
+            return d > Date()
+        }
+
         func rank(_ m: MailMessage) -> Int {
             // Mail you sent yourself is a note, never "needs you" — sink it.
             if m.isFromSelf(mine) { return -10_000 }
             let vipBonus = (m.senderAddress.map { vips.contains($0.lowercased()) } ?? false) ? VIPStore.scoreBonus : 0
             // Real ACTIONS get a bump even if Apple didn't flag them, so an invoice
-            // or a "verify by" from a no-reply sender isn't buried under newsletters.
+            // or a "verify by <date>" from a no-reply sender isn't buried.
             let actionBump: Int
-            switch m.deterministicAction(mine: mine) {
+            switch m.deterministicAction(mine: mine, deadline: deadlineByID[m.id]) {
             case .pay, .confirm: actionBump = 55
             case .review:        actionBump = 35
             case .reply:         actionBump = 25
             default:             actionBump = 0
             }
-            // Learned signals: senders you open (affinity) + topics you care about.
             return m.importanceScore + vipBonus + actionBump
                 + LearnStore.affinity(m.senderAddress) + OwnerModel.score(m)
         }
@@ -926,15 +944,6 @@ final class BriefingService {
 
         // Collapse duplicates / threads (prefers conversationID, else sender+subject).
         let prioritized = Self.collapseDuplicates(ordered)
-
-        // Detected deadlines, computed ONCE per message (regex — never in a sort).
-        let deadlineByID: [Int64: Date] = Dictionary(
-            active.compactMap { msg in msg.detectedDeadline.map { (msg.id, $0) } },
-            uniquingKeysWith: { a, _ in a })
-        func pendingDeadline(_ m: MailMessage) -> Bool {
-            guard let d = deadlineByID[m.id] else { return false }
-            return d > Date()
-        }
 
         // ONE definition of "needs you", reused for featuring + counts + badge +
         // caught-up so they can never disagree. A note-to-self never qualifies.
@@ -947,6 +956,9 @@ final class BriefingService {
             let m = g.message
             guard !m.isFromSelf(mine),
                   !(m.messageID.map(dismissed.contains) ?? false),   // you marked it done
+                  // Routine notification (2FA code / password-changed / social) with
+                  // no real deadline is FYI — never "needs you", however Apple flags it.
+                  !(m.isEphemeralNotification && deadlineByID[m.id] == nil),
                   rank(m) >= 30 else { return false }
             if !m.isRead { return true }
             if m.isFlagged || VIPStore.isVIP(m.senderAddress) { return true }
@@ -1013,7 +1025,8 @@ final class BriefingService {
                     // it once labeled a self-note "reply"); trust the model only for
                     // phrasing. Sanitize its title/detail: they're built from
                     // attacker-controlled email text and rendered in the trusted UI.
-                    let det = m.deterministicAction(mine: mine)
+                    let deadline = deadlineByID[m.id]
+                    let det = m.deterministicAction(mine: mine, deadline: deadline)
                     let action: AIAction = (det != .none && det != .read) ? det
                         : (entry.action == .reply && !m.isReplyable ? .read : entry.action)
                     let title = PromptSafety.sanitize(entry.title, maxChars: 80)
@@ -1024,8 +1037,8 @@ final class BriefingService {
                         action: action,
                         isNew: m.dateReceived > seenAt,
                         messageID: m.messageID,
-                        dueDate: m.detectedDeadline,
-                        reason: m.attentionReason(mine: mine),
+                        dueDate: deadline,
+                        reason: m.attentionReason(mine: mine, deadline: deadline),
                         replyable: m.isReplyable
                     )
                 }
@@ -1232,15 +1245,16 @@ final class BriefingService {
         else { icon = "envelope.open" }
         let sender = selfNote ? "Your note" : m.senderDisplay
         let detail = group.count > 1 ? "\(sender) · \(group.count) messages" : sender
+        let deadline = m.detectedDeadline   // compute once (few featured items)
         return BriefingItem(
             icon: icon,
             title: cleanTitle(m.subject),
             detail: detail,
-            action: m.deterministicAction(mine: mine),
+            action: m.deterministicAction(mine: mine, deadline: deadline),
             isNew: m.dateReceived > seenAt,
             messageID: m.messageID,
-            dueDate: m.detectedDeadline,
-            reason: m.attentionReason(mine: mine),
+            dueDate: deadline,
+            reason: m.attentionReason(mine: mine, deadline: deadline),
             replyable: !selfNote && m.isReplyable
         )
     }

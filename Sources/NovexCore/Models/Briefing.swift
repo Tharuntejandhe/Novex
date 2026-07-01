@@ -68,13 +68,13 @@ struct MailMessage: Identifiable, Hashable, Sendable {
         if unsubscribeType > 0 { penalty += 35 }   // newsletter / promo (List-Unsubscribe)
         if isNotificationSender { penalty += 50 }  // no-reply / notification bot
 
-        // Apple-CONFIRMED important mail (urgent / high-impact / needs-reply) is a
-        // real ACTION even when it comes from an automated sender — a bank
-        // verification deadline, a tax document, a 2FA prompt. The old code let the
-        // -45/-50 noise penalties drag these NEGATIVE (PayPal "verify by", Fiverr
-        // tax cert all vanished). Cap the penalty so a genuine action can't be
-        // buried; pure noise still takes the full hit.
-        if isUrgent || isHighImpact || needsFollowUp {
+        // Rescue GENUINE actions from the noise penalty (Apple-urgent, or you owe a
+        // reply, or a high-impact mail from a REAL sender). But do NOT rescue a
+        // notification bot just because Apple flagged it high-impact — a Facebook
+        // 2FA code / "password changed" / "account verification" is high-impact yet
+        // needs nothing from you. Those that DO carry a real deadline/bill get
+        // rescued later by the action bonus in the ranker (which has the deadline).
+        if isUrgent || needsFollowUp || (isHighImpact && !isNotificationSender) {
             s -= min(penalty, 40)
         } else {
             s -= penalty
@@ -105,13 +105,51 @@ struct MailMessage: Identifiable, Hashable, Sendable {
         guard !text.isEmpty,
               let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue)
         else { return nil }
-        let range = NSRange(text.startIndex..., in: text)
+        // A DEADLINE needs a cue — "by/due/before/expires/pay by/verify by". A bare
+        // date is just a mention (a meeting time, a session), NOT a to-do, so we
+        // don't stamp "overdue" on a session invitation.
+        let cues = ["by ", " due", "due ", "before ", "expire", "deadline", "no later",
+                    "last day", "ends ", "closes ", "respond by", "reply by", "act by",
+                    "pay by", "verify by", "complete by", "within "]
+        let ns = text as NSString
         let now = Date()
-        // A deadline is a near-future date (allow a day's slack for "today").
-        return detector.matches(in: text, range: range)
-            .compactMap(\.date)
-            .filter { $0 > now.addingTimeInterval(-86_400) && $0 < now.addingTimeInterval(400 * 86_400) }
-            .min()
+        var best: Date?
+        for m in detector.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            guard let d = m.date,
+                  d > now.addingTimeInterval(-30 * 86_400),      // recently-overdue still counts
+                  d < now.addingTimeInterval(400 * 86_400) else { continue }
+            let start = max(0, m.range.location - 34)
+            let pre = ns.substring(with: NSRange(location: start, length: m.range.location - start)).lowercased()
+            if cues.contains(where: { pre.contains($0) }) {
+                if best == nil || d < best! { best = d }
+            }
+        }
+        return best
+    }
+
+    /// Routine notifications that are FYI or ephemeral — a one-time code you use
+    /// instantly, a "password changed" notice, a social ping, an account-verify
+    /// prompt. High-impact to Apple, but they need NOTHING from you, so they must
+    /// never be featured as "needs you" or labeled confirm/review. (A genuine
+    /// deadline overrides this — see the callers.)
+    var isEphemeralNotification: Bool {
+        let t = (subject + " " + (snippet ?? "")).lowercased()
+        let markers = [
+            // one-time codes / OTP
+            "verification code", "login code", "security code", "one-time", "one time",
+            "otp", "your code is", "confirmation code", "access code", "2fa code",
+            "recovery code", "authentication code", "single-use code",
+            // routine security / account FYIs
+            "password change", "password was changed", "password reset", "changed your password",
+            "new login", "new sign-in", "new sign in", "was accessed", "unusual activity",
+            "suspicious login", "we noticed a", "account verification", "verify your account",
+            "your account was", "successfully logged",
+            // social pings
+            "posted an update", "commented on", "liked your", "mentioned you",
+            "friend request", "tagged you", "started following", "reacted to",
+            "sent you a message request", "wants to connect",
+        ]
+        return markers.contains { t.contains($0) }
     }
 
     /// True when this mail was sent BY the user (a note-to-self / your own send).
@@ -172,21 +210,28 @@ struct MailMessage: Identifiable, Hashable, Sendable {
     /// Deterministic action label — runs in CODE, so pay/confirm/reply still work
     /// with Apple Intelligence OFF (the model only refines phrasing). `mine` = the
     /// user's own addresses, so a note-to-self never becomes a "reply".
-    func deterministicAction(mine: Set<String>) -> AIAction {
+    /// `deadline` is precomputed by the caller (regex is too slow for the ranker's
+    /// hot path) — pass `detectedDeadline` once per message.
+    func deterministicAction(mine: Set<String>, deadline: Date?) -> AIAction {
         if isFromSelf(mine) { return .none }
+        // Routine notification with no real deadline → FYI, never confirm/review.
+        if isEphemeralNotification && deadline == nil { return isRead ? .none : .read }
         let text = (subject + " " + (snippet ?? "")).lowercased()
         func has(_ words: [String]) -> Bool { words.contains { text.contains($0) } }
 
         if has(["invoice", "amount due", "payment due", "pay now", "outstanding balance",
-                "your bill", "bill is due", "make a payment", "complete your payment"]) {
+                "your bill", "bill is due", "make a payment", "complete your payment",
+                "past due", "payment failed", "renew your subscription"]) {
             return .pay
         }
-        if has(["verify your", "verify identity", "confirm your", "action required",
-                "complete your verification", "recovery codes", "two-factor", "2fa",
-                "please confirm", "confirm your email", "rsvp", "reset your password"]) {
+        // A REAL deadline, or explicit verify/confirm language you must act on.
+        if deadline != nil || has(["verify your identity", "verify your", "confirm your",
+                "action required", "complete your verification", "please confirm",
+                "confirm your email", "rsvp"]) {
             return .confirm
         }
-        if (isHighImpact || isTransactional) && !isRead { return .review }
+        // Apple "Transactions" (a receipt/statement) from a real sender, not a bot.
+        if isTransactional && !isNotificationSender && !isRead { return .review }
         if isReplyable && (needsFollowUp
             || subject.trimmingCharacters(in: .whitespaces).hasSuffix("?")) {
             return .reply
@@ -194,15 +239,15 @@ struct MailMessage: Identifiable, Hashable, Sendable {
         return isRead ? .none : .read
     }
 
-    /// One-word reason this surfaced — shown in the UI so ranking isn't a black
-    /// box. (Calls `detectedDeadline`, so only invoke on already-featured items.)
-    func attentionReason(mine: Set<String>) -> String? {
+    /// One-word reason this surfaced. `deadline` precomputed. The date itself is
+    /// shown as a separate chip, so this returns the OTHER reason (or nil).
+    func attentionReason(mine: Set<String>, deadline: Date?) -> String? {
         if isFromSelf(mine) { return "your note" }
         if isUrgent { return "urgent" }
         if isFlagged { return "flagged" }
-        if isHighImpact { return "important" }
-        if detectedDeadline != nil { return "deadline" }
-        if needsFollowUp { return "awaiting reply" }
+        if needsFollowUp && isReplyable { return "awaiting reply" }
+        if isTransactional && !isNotificationSender { return "bill" }
+        if isHighImpact && !isNotificationSender { return "important" }
         return nil
     }
 }

@@ -754,19 +754,21 @@ group("brain v2 — self, actions, rescue, personal, bots") {
     // R2 — a note to self is never a reply, never "needs you".
     let selfNote = m(1, "tharun@gmail.com", "My todo list", needsReply: true)
     check(selfNote.isFromSelf(me), "recognizes my own address")
-    checkEqual(selfNote.deterministicAction(mine: me), AIAction.none, "self-note action is none, not reply")
+    checkEqual(selfNote.deterministicAction(mine: me, deadline: nil), AIAction.none, "self-note action is none, not reply")
 
     // R3 — deterministic actions work without the LLM.
-    checkEqual(m(2, "billing@acme.com", "Your invoice is due").deterministicAction(mine: me),
+    checkEqual(m(2, "billing@acme.com", "Your invoice is due").deterministicAction(mine: me, deadline: nil),
                AIAction.pay, "invoice → pay")
-    checkEqual(m(3, "no-reply@paypal.com", "Verify your identity by 14/07/2026").deterministicAction(mine: me),
+    checkEqual(m(3, "no-reply@paypal.com", "Verify your identity by 14/07/2026").deterministicAction(mine: me, deadline: nil),
                AIAction.confirm, "verify → confirm")
 
-    // R3/R4 — a high-impact verification from a no-reply sender is RESCUED above
-    // the feature bar (the old penalties buried PayPal/GitHub/Fiverr at negative).
+    // A high-impact verify-by-date from a no-reply sender is an ACTION (confirm),
+    // so the ranker's action bonus surfaces it — even though its raw noise-penalized
+    // score is low (the fix: don't blanket-rescue every high-impact bot mail).
     let verify = m(4, "no-reply@paypal.com", "Verify your identity by 14/07/2026",
                    read: true, automated: 2, highImpact: true, category: 2)
-    check(verify.importanceScore >= 30, "high-impact verify clears the feature bar (was negative)")
+    checkEqual(verify.deterministicAction(mine: me, deadline: nil), AIAction.confirm,
+               "verify-by-date → confirm (surfaces via the action bonus)")
 
     // R4 — a friend's short personal mail isn't buried as "automated".
     let friend = m(5, "raj@gmail.com", "hey bro", snippet: "hello", automated: 2)
@@ -805,6 +807,39 @@ group("dismiss store — mark done, stop showing") {
     DismissStore.dismiss(nil)
     DismissStore.dismiss("")
     check(!DismissStore.isDismissed(""), "nil/empty ids are ignored")
+}
+
+group("routine notifications vs real actions (the Facebook/overdue bug)") {
+    let none: Set<String> = []
+    func msg(_ id: Int64, _ sub: String, _ snip: String = "",
+             sender: String = "notification@facebookmail.com", hi: Bool = true,
+             read: Bool = false) -> MailMessage {
+        MailMessage(id: id, dateReceived: Date(timeIntervalSinceReferenceDate: 100 * 86_400),
+                    isRead: read, isFlagged: false, subject: sub, senderName: "Facebook",
+                    senderAddress: sender, mailbox: "imap://u@h/INBOX", messageID: "<n\(id)@x>",
+                    snippet: snip, isUrgent: false, automatedType: 2, unsubscribeType: 0,
+                    isHighImpact: hi, needsFollowUp: false, category: 2)
+    }
+    // 2FA codes / password-changed / account-verify are FYI — never confirm/review.
+    check(msg(1, "Facebook Code", "Your login code is 481920").isEphemeralNotification, "2FA code is ephemeral")
+    check(msg(2, "Password Change", "Your password was changed").isEphemeralNotification, "password-changed is ephemeral")
+    check(msg(3, "Account Verification", "verify your account to continue").isEphemeralNotification, "account-verify is ephemeral")
+    checkEqual(msg(1, "Facebook Code", "Your login code is 481920").deterministicAction(mine: none, deadline: nil),
+               AIAction.read, "2FA code → NOT confirm/review")
+    checkEqual(msg(2, "Password Change", "Your password was changed").deterministicAction(mine: none, deadline: nil),
+               AIAction.read, "password FYI → NOT review")
+
+    // A session invitation MENTIONS a date but it's not a deadline → no false 'overdue'.
+    let session = msg(4, "Expert Session Invitation", "Join us on July 5, 2026 at 3pm for the session.",
+                      sender: "hello@pod.com")
+    check(session.detectedDeadline == nil, "a session date with no by/due cue is NOT a deadline (no false overdue)")
+    check(!session.isEphemeralNotification, "session invite isn't an ephemeral notification")
+
+    // A real 'verify ... by <date>' IS a deadline that surfaces.
+    let pay = msg(5, "Verify your identity", "Please verify your identity by July 14, 2026 to avoid limits.",
+                  sender: "no-reply@paypal.com")
+    check(pay.detectedDeadline != nil, "'verify ... by <date>' IS a real deadline")
+    check(!pay.isEphemeralNotification, "identity-verify with a deadline is a real action, not FYI")
 }
 
 // MARK: - Summary
