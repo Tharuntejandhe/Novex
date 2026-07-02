@@ -1082,6 +1082,21 @@ group("agentic chat (search tool / protocol parsing / plate)") {
     check(ActionParser.isUndo("undo") && ActionParser.isUndo("bring them back") && ActionParser.isUndo("oops undo that"),
           "action: undo phrases are recognized")
     check(!ActionParser.isUndo("what did undo the change"), "action: 'undo' mid-sentence in a question is not an undo command")
+
+    // Catch-up + planning detection (route to grounded summaries / plate citations).
+    check(ActionParser.isCatchUp("catch me up") && ActionParser.isCatchUp("what did i miss"),
+          "catch-up: 'catch me up' / 'what did i miss' recognized")
+    check(!ActionParser.isCatchUp("did sarah email me"), "catch-up: a specific lookup is not a catch-up")
+    check(ActionParser.isPlanningQuestion("what do I need to do today?") && ActionParser.isPlanningQuestion("anything urgent?"),
+          "planning: 'what do I need to do' / 'anything urgent' recognized")
+    check(!ActionParser.isPlanningQuestion("what did facebook send me"), "planning: a lookup is not a planning question")
+
+    // Plate items back the citations for planning + catch-up answers.
+    let items = BriefingService.plateItems(from: inbox, mine: [])
+    check(items.contains { $0.m.messageID == "<a1@x>" }, "plate: the recruiter's question is an actionable plate item")
+    let summary = BriefingService.catchUpSummary(items: items, pool: inbox, mine: [])
+    check(summary.contains("unread") && !summary.contains("caught up"),
+          "catch-up: summary reports the count and what needs you (grounded, no model)")
 }
 
 // MARK: - Summary

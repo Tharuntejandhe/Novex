@@ -185,6 +185,17 @@ final class BriefingService {
             return
         }
 
+        // "Catch me up" / "what did I miss": a deterministic, grounded inbox summary
+        // (counts + who needs a reply) - faster and more reliable than a model search,
+        // with the actionable emails attached as tappable citations.
+        if ActionParser.isCatchUp(q) {
+            let mine2 = OwnerIdentity.addresses
+            let items = Self.plateItems(from: pool, mine: mine2)
+            setChatAnswer(Self.catchUpSummary(items: items, pool: pool, mine: mine2), turnID: turnID)
+            setChatSources(items.prefix(3).map { $0.m }, turnID: turnID)
+            return
+        }
+
         // Agentic Q&A: the model SEARCHes the inbox on demand (its own keywords, more
         // than once), grounded by the deterministic plate + inbox stats. Answer-only -
         // it can never act. The emails it searched become tappable citations.
@@ -196,7 +207,13 @@ final class BriefingService {
             if let reply = try? await agent.answer(q),
                !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 setChatAnswer(Self.tidyAnswer(reply.text), turnID: turnID)
-                setChatSources(reply.sources, turnID: turnID)
+                // Planning answers ("what needs me") come from the plate, so cite the
+                // plate's emails when the model didn't search for specific sources.
+                var sources = reply.sources
+                if sources.isEmpty, ActionParser.isPlanningQuestion(q) {
+                    sources = Self.plateItems(from: pool, mine: mineNow).map { $0.m }
+                }
+                setChatSources(sources, turnID: turnID)
                 return
             }
         }
@@ -281,14 +298,13 @@ final class BriefingService {
         if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = answer }
     }
 
-    /// Deterministic "what actually needs the user" summary, from the SAME engine
-    /// the briefing uses (not the model's guess). Fed to the agent so planning
-    /// answers are grounded and an FYI is never sold as a to-do.
-    nonisolated static func plateSummary(from pool: [MailMessage], mine: Set<String>, limit: Int = 8) -> String {
+    /// The emails that actually need the user, each with a label - the SAME engine
+    /// the Inbox uses (rank >= 30 + read-handled), so an FYI is never a to-do. Shared
+    /// by the plate summary, catch-up, and planning-answer citations.
+    nonisolated static func plateItems(from pool: [MailMessage], mine: Set<String>) -> [(m: MailMessage, label: String)] {
         let now = Date()
-        let rel = RelativeDateTimeFormatter()
         let dismissed = DismissStore.dismissed()
-        let actionable: [(m: MailMessage, label: String)] = pool.compactMap { m in
+        return pool.compactMap { m -> (MailMessage, String)? in
             guard !m.isFromSelf(mine), !m.isEphemeralNotification,
                   !(m.messageID.map(dismissed.contains) ?? false) else { return nil }
             let deadline = m.detectedDeadline
@@ -302,18 +318,22 @@ final class BriefingService {
             case .reply:   bump = 25; label = "needs a reply"
             default:       return nil
             }
-            // SAME bar the Inbox uses (rank >= 30). importanceScore penalizes
-            // newsletters and no-reply bots, so marketing with a "?" or a fake
-            // deadline (Naukri "is your English ready?", a contest "last call")
-            // never clears the bar and is NOT called a to-do.
+            // marketing with a "?" or a fake deadline never clears the bar.
             guard m.importanceScore + bump >= 30 else { return nil }
-            // A READ action with nothing still pending is assumed handled - stop
-            // nagging (matches the Inbox's read-handled rule).
+            // A READ action with nothing still pending is assumed handled.
             if m.isRead, !m.isFlagged, !(m.needsFollowUp && m.isReplyable),
                !(deadline.map { $0 > now } ?? false) { return nil }
             return (m, label)
         }
-        .sorted { $0.m.dateReceived > $1.m.dateReceived }
+        .sorted { $0.0.dateReceived > $1.0.dateReceived }
+    }
+
+    /// Deterministic "what actually needs the user" summary, fed to the agent so
+    /// planning answers are grounded and an FYI is never sold as a to-do.
+    nonisolated static func plateSummary(from pool: [MailMessage], mine: Set<String>, limit: Int = 8) -> String {
+        let actionable = plateItems(from: pool, mine: mine)
+        let now = Date()
+        let rel = RelativeDateTimeFormatter()
         guard !actionable.isEmpty else {
             return "Nothing needs the user right now - only notifications and newsletters."
         }
@@ -323,6 +343,34 @@ final class BriefingService {
             let subject = PromptSafety.sanitize(String(pair.m.subject.prefix(70)), maxChars: 70)
             return "- \(sender): \(subject) [\(pair.label), \(when)]"
         }.joined(separator: "\n")
+    }
+
+    /// A grounded one-line "catch me up": what needs you + who, plus unread and
+    /// newsletter counts. Deterministic (no model), so it's always right.
+    nonisolated static func catchUpSummary(items: [(m: MailMessage, label: String)],
+                                           pool: [MailMessage], mine: Set<String>) -> String {
+        let unread = pool.filter { !$0.isRead && !$0.isFromSelf(mine) }.count
+        let newsletters = pool.filter { !$0.isFromSelf(mine) && DeclutterService.isNewsletter($0) }.count
+        let extra = newsletters > 0 ? " and \(newsletters) newsletters you can clear" : ""
+        guard !items.isEmpty else {
+            return "You're caught up - nothing needs you right now. \(unread) unread, mostly notifications\(extra)."
+        }
+        let replies = items.filter { $0.label == "needs a reply" }
+        let bills = items.filter { $0.label == "bill to pay" }
+        let others = items.count - replies.count - bills.count
+        var needs: [String] = []
+        if !replies.isEmpty {
+            needs.append("\(replies.count) \(replies.count == 1 ? "reply" : "replies") owed (\(senderList(replies.map { $0.m.senderDisplay })))")
+        }
+        if !bills.isEmpty { needs.append("\(bills.count) bill\(bills.count == 1 ? "" : "s") to pay") }
+        if others > 0 { needs.append("\(others) to review") }
+        let joined: String
+        switch needs.count {
+        case 1:  joined = needs[0]
+        case 2:  joined = "\(needs[0]) and \(needs[1])"
+        default: joined = needs.dropLast().joined(separator: ", ") + ", and " + needs.last!
+        }
+        return "You've got \(joined). Overall \(unread) unread\(extra)."
     }
 
     private func setChatAnswer(_ text: String, turnID: UUID) {

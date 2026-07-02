@@ -202,6 +202,30 @@ enum ActionParser {
         hint.isEmpty || clutterWords.contains { hint.contains($0) }
     }
 
+    /// A "catch me up" / "what did I miss" request - answer with a deterministic
+    /// inbox summary (counts + who needs a reply) rather than a fuzzy model search.
+    static func isCatchUp(_ q: String) -> Bool {
+        let l = q.lowercased()
+        let phrases = ["catch me up", "catch up", "what did i miss", "what have i missed",
+                       "whats new", "what's new", "anything new", "summarize my inbox",
+                       "summarise my inbox", "summarize my email", "brief me", "give me a rundown",
+                       "give me the rundown", "rundown", "recap", "what's happening", "whats happening",
+                       "fill me in", "bring me up to speed", "the gist"]
+        return phrases.contains { l == $0 || l.contains($0) }
+    }
+
+    /// A "what needs me / what's on my plate" planning question - the answer is
+    /// grounded in the plate, so its citations should be the plate's emails.
+    static func isPlanningQuestion(_ q: String) -> Bool {
+        let l = q.lowercased()
+        let phrases = ["what needs me", "needs me", "need to do", "what do i do", "what should i do",
+                       "on my plate", "to-do", "to do today", "to do list", "anything for me",
+                       "what's on my", "whats on my", "priorities", "what matters", "anything urgent",
+                       "anything important", "what do i need", "what's important", "whats important",
+                       "anything i should", "what's next", "whats next"]
+        return phrases.contains { l.contains($0) }
+    }
+
     /// Human psychology: people rarely ask plainly. "ugh so much spam" / "my inbox is
     /// a mess" isn't a question to search - it's a nudge for help. Detect it so we can
     /// offer the cleanup instead of literally searching for the word "spam".
