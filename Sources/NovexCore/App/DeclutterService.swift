@@ -77,12 +77,17 @@ final class DeclutterService {
     /// Whether a message is newsletter/promo/bulk mail — i.e. clutter we can
     /// offer to unsubscribe from or mute. Uses Mail's own signals.
     nonisolated static func isNewsletter(_ m: MailMessage) -> Bool {
-        // NEVER treat bills/receipts or security/code/terms notices as "clutter" —
-        // muting hides a sender from the WHOLE briefing, so muting your bank or an
-        // order confirmation would suppress genuinely important mail.
+        // Bills / receipts are never "clutter" — muting hides a sender from the WHOLE
+        // briefing, so muting your bank or an order confirmation would hide real mail.
         if m.isTransactional { return false }
+        // Anything with a real List-Unsubscribe IS clearable clutter — including
+        // social-activity pings (Facebook/LinkedIn), which are FYI on the plate but
+        // the user may still want to clear here. Checked BEFORE the ephemeral gate
+        // (security codes/alerts have no unsubscribe, so they stay protected below).
+        if m.unsubscribeType > 0 { return true }
+        // Security codes / login alerts / terms updates (no unsubscribe) are FYI, not
+        // clutter to mute — never let muting suppress them.
         if m.isEphemeralNotification { return false }
-        if m.unsubscribeType > 0 { return true }   // Mail saw a List-Unsubscribe header
         if m.automatedType >= 2 { return true }     // bulk/automated marketing
         return false
     }

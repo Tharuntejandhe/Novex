@@ -878,6 +878,18 @@ group("routine notifications vs real actions (the Facebook/overdue bug)") {
     check(policy.detectedDeadline == nil, "a policy 'effective by <date>' is NOT a to-do deadline")
     checkEqual(policy.deterministicAction(mine: none, deadline: policy.detectedDeadline), AIAction.read,
                "policy update → read, never confirm")
+
+    // Social-activity notifications are FYI, not a "to review" task (real-inbox bug:
+    // "Rahul on Facebook" / friend suggestions were landing on the needs-you plate).
+    check(msg(10, "Rahul on Facebook", "See what Rahul has been up to.").isEphemeralNotification,
+          "'X on Facebook' social notification is FYI")
+    check(msg(11, "Facebook Friend Suggestions", "People you may know").isEphemeralNotification,
+          "friend suggestions are FYI")
+    check(msg(12, "Rahul Nagula posted a photo", "Check out the new photo.").isEphemeralNotification,
+          "'posted a photo' social ping is FYI")
+    // A real person's actual request is NOT swept up as a social ping.
+    check(!msg(13, "Can you review the deck before Friday?", "Let me know your thoughts.", sender: "raj@gmail.com").isEphemeralNotification,
+          "a real review request is NOT a social ping")
 }
 
 group("tab-sweep fixes (follow-up / money / cleanup)") {

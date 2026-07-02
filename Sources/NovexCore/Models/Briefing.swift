@@ -159,10 +159,16 @@ struct MailMessage: Identifiable, Hashable, Sendable {
             "policy change", "updates to our", "changes to our", "update our terms",
             "updated our terms", "updated terms", "we're updating", "we are updating",
             "changes to the terms", "update to our", "changes to your terms",
-            // social pings
-            "posted an update", "commented on", "liked your", "mentioned you",
-            "friend request", "tagged you", "started following", "reacted to",
-            "sent you a message request", "wants to connect", "new follower",
+            // social pings — activity notifications from Facebook/Instagram/LinkedIn/X
+            // are FYI, never a to-do (a "Rahul on Facebook" / friend-suggestion was
+            // wrongly landing on the "needs you" plate).
+            "posted an update", "posted a ", "posted on", "shared a ", "commented on",
+            "liked your", "mentioned you", "friend request", "friend suggestion",
+            "people you may know", "wants to be friends", "tagged you", "started following",
+            "reacted to", "sent you a message request", "wants to connect", "new follower",
+            "on facebook", "on instagram", "on linkedin", "on threads",
+            "viewed your profile", "endorsed you", "invitation to connect",
+            "invited you to connect", "new connection", "is now on",
         ]
         return markers.contains { t.contains($0) }
     }
