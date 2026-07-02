@@ -371,15 +371,17 @@ struct WidgetView: View {
 
     @ViewBuilder
     private func chatTurn(_ turn: BriefingService.ChatTurn) -> some View {
-        // Your question — a right-aligned bubble.
-        HStack {
-            Spacer(minLength: 36)
-            Text(turn.question)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.95))
-                .padding(.horizontal, 11).padding(.vertical, 7)
-                .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(Color.cyan.opacity(0.22)))
+        // Your question — a right-aligned bubble (skipped for system confirmations).
+        if !turn.question.isEmpty {
+            HStack {
+                Spacer(minLength: 36)
+                Text(turn.question)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.95))
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color.cyan.opacity(0.22)))
+            }
         }
         // Novex's answer — left-aligned, with a sparkle.
         HStack(alignment: .top, spacing: 8) {
@@ -397,23 +399,45 @@ struct WidgetView: View {
         .padding(.trailing, 24)
     }
 
-    /// Tappable "open in Mail" citations under an answer — the source emails it came
-    /// from, so the user can verify and jump straight to them.
+    /// Source-email citations under an answer, each with inline quick-actions: tap
+    /// the name to open it in Mail, or act on it (Reply / Done) without typing.
     @ViewBuilder
     private func sourceChips(_ sources: [BriefingService.ChatSource]) -> some View {
-        HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach(sources) { s in
-                HStack(spacing: 3) {
-                    Image(systemName: "arrow.up.forward.app").font(.system(size: 9))
-                    Text(s.sender).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                HStack(spacing: 5) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.up.forward.app").font(.system(size: 9))
+                        Text(s.sender).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                    }
+                    .foregroundStyle(.cyan.opacity(0.85))
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(Color.cyan.opacity(0.12)))
+                    .appKitTap { if let url = mailURLFor(s.messageID) { openInMail(url) } }
+
+                    if s.canReply {
+                        citationAction("Reply") {
+                            if let m = service.message(forID: s.messageID) {
+                                LearnStore.recordOpen(m.senderAddress); replyTarget = m
+                            }
+                        }
+                    }
+                    citationAction("Done") {
+                        Task { await service.markDoneFromCitation(s.messageID, sender: s.sender) }
+                    }
                 }
-                .foregroundStyle(.cyan.opacity(0.85))
-                .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(Capsule().fill(Color.cyan.opacity(0.12)))
-                .appKitTap { if let url = mailURLFor(s.messageID) { openInMail(url) } }
             }
         }
         .padding(.top, 1)
+    }
+
+    private func citationAction(_ label: String, _ act: @escaping () -> Void) -> some View {
+        Text(label)
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.white.opacity(0.8))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background(Capsule().fill(Color.white.opacity(0.1)))
+            .appKitTap(act)
     }
 
     private func analyzingCard(title: String, subtitle: String) -> some View {

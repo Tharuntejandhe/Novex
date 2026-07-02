@@ -25,10 +25,12 @@ final class BriefingService {
         /// citations so the user can verify and jump to the source.
         var sources: [ChatSource] = []
     }
-    /// A citation: an email the answer came from.
+    /// A citation: an email the answer came from. Carries enough to act on it inline
+    /// (open in Mail, reply, or mark done) without leaving the chat.
     struct ChatSource: Identifiable, Equatable, Sendable {
         let messageID: String
         let sender: String
+        var canReply: Bool = false
         var id: String { messageID }
     }
     /// When the user taps a notch notification, the panel opens focused on that
@@ -439,13 +441,27 @@ final class BriefingService {
         }.prefix(12))
     }
 
-    /// Attach the emails an answer was grounded in as tappable citations (top 3).
+    /// Attach the emails an answer was grounded in as tappable citations (top 3),
+    /// flagged with whether each can be replied to (a real person, not a bot/self).
     private func setChatSources(_ sources: [MailMessage], turnID: UUID) {
+        let mine = OwnerIdentity.addresses
         let cites = sources.prefix(3).compactMap { m -> ChatSource? in
             guard let id = m.messageID, !id.isEmpty else { return nil }
-            return ChatSource(messageID: id, sender: PromptSafety.sanitize(m.senderDisplay, maxChars: 32))
+            return ChatSource(messageID: id,
+                              sender: PromptSafety.sanitize(m.senderDisplay, maxChars: 32),
+                              canReply: m.isReplyable && !m.isFromSelf(mine))
         }
         if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].sources = cites }
+    }
+
+    /// Mark a cited email done straight from the chat (reversible), with a light
+    /// confirmation turn and "undo" support.
+    func markDoneFromCitation(_ messageID: String, sender: String) async {
+        DismissStore.dismiss(messageID)
+        lastDismissed = [messageID]; lastSnoozed = []
+        chat.append(ChatTurn(id: UUID(), question: "",
+                             answer: "Done - cleared \(sender). Say \"undo\" to bring it back."))
+        await refresh()
     }
 
     /// De-duplicated sender list: "Sarah, Mom, and Facebook".
