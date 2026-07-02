@@ -132,6 +132,24 @@ final class BriefingService {
                 lastMessagesSnapshot = fresh
             }
         }
+
+        // Agentic path: let the on-device model SEARCH the inbox on demand (its own
+        // keywords, more than once), grounded by the deterministic "what needs you"
+        // plate, instead of answering from one fixed slice of context. Falls through
+        // to the proven retrieval path below if the model is unavailable or errors.
+        if #available(macOS 26.0, *),
+           let client = llmClient as? FoundationModelsClient, client.isAvailable {
+            let mineNow = OwnerIdentity.addresses
+            let agent = NovexAgent(messages: pool, mine: mineNow,
+                                   plate: Self.plateSummary(from: pool, mine: mineNow))
+            if let raw = try? await agent.answer(q),
+               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let a = Self.tidyAnswer(raw)
+                if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = a }
+                return
+            }
+        }
+
         let relevant = MailRetrieval.rank(question: q, messages: pool, limit: 12)
         let grounded = await attachBodies(relevant)
 
@@ -212,13 +230,64 @@ final class BriefingService {
         if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = answer }
     }
 
+    /// Deterministic "what actually needs the user" summary, from the SAME engine
+    /// the briefing uses (not the model's guess). Fed to the agent so planning
+    /// answers are grounded and an FYI is never sold as a to-do.
+    nonisolated static func plateSummary(from pool: [MailMessage], mine: Set<String>, limit: Int = 8) -> String {
+        let now = Date()
+        let rel = RelativeDateTimeFormatter()
+        let dismissed = DismissStore.dismissed()
+        let actionable: [(m: MailMessage, label: String)] = pool.compactMap { m in
+            guard !m.isFromSelf(mine), !m.isEphemeralNotification,
+                  !(m.messageID.map(dismissed.contains) ?? false) else { return nil }
+            let deadline = m.detectedDeadline
+            let action = m.deterministicAction(mine: mine, deadline: deadline)
+            let bump: Int
+            let label: String
+            switch action {
+            case .pay:     bump = 55; label = "bill to pay"
+            case .confirm: bump = 55; label = "action needed"
+            case .review:  bump = 35; label = "to review"
+            case .reply:   bump = 25; label = "needs a reply"
+            default:       return nil
+            }
+            // SAME bar the Inbox uses (rank >= 30). importanceScore penalizes
+            // newsletters and no-reply bots, so marketing with a "?" or a fake
+            // deadline (Naukri "is your English ready?", a contest "last call")
+            // never clears the bar and is NOT called a to-do.
+            guard m.importanceScore + bump >= 30 else { return nil }
+            // A READ action with nothing still pending is assumed handled - stop
+            // nagging (matches the Inbox's read-handled rule).
+            if m.isRead, !m.isFlagged, !(m.needsFollowUp && m.isReplyable),
+               !(deadline.map { $0 > now } ?? false) { return nil }
+            return (m, label)
+        }
+        .sorted { $0.m.dateReceived > $1.m.dateReceived }
+        guard !actionable.isEmpty else {
+            return "Nothing needs the user right now - only notifications and newsletters."
+        }
+        return actionable.prefix(limit).map { pair in
+            let when = rel.localizedString(for: pair.m.dateReceived, relativeTo: now)
+            let sender = PromptSafety.sanitize(pair.m.senderDisplay, maxChars: 40)
+            let subject = PromptSafety.sanitize(String(pair.m.subject.prefix(70)), maxChars: 70)
+            return "- \(sender): \(subject) [\(pair.label), \(when)]"
+        }.joined(separator: "\n")
+    }
+
     /// Clean up a model answer: strip the markdown/asterisk dumps the small model
     /// sometimes emits, and hard-cap the length so a paste can't fill the panel.
     nonisolated static func tidyAnswer(_ s: String) -> String {
         var a = s.trimmingCharacters(in: .whitespacesAndNewlines)
         a = a.replacingOccurrences(of: #"\*{2,}"#, with: "", options: .regularExpression)
         a = a.replacingOccurrences(of: #"(?m)^\s*[-*•]\s+"#, with: "", options: .regularExpression)
-        a = a.replacingOccurrences(of: #"\n{2,}"#, with: " ", options: .regularExpression)
+        // Strip any internal classification tags the model copied from the plate /
+        // search results ("[needs a reply, 1 week ago]") so an answer never leaks them.
+        a = a.replacingOccurrences(
+            of: #"\s*\[(action needed|needs a reply|bill to pay|to review|fyi|newsletter|your own note)[^\]]*\]"#,
+            with: "", options: [.regularExpression, .caseInsensitive])
+        // Chat answers are one flowing reply, not a list - collapse newlines.
+        a = a.replacingOccurrences(of: #"\n+"#, with: " ", options: .regularExpression)
+        a = a.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
         a = a.trimmingCharacters(in: .whitespacesAndNewlines)
         if a.count > 520 { a = String(a.prefix(500)).trimmingCharacters(in: .whitespaces) + "…" }
         return a.isEmpty ? "I couldn't find anything on that." : a
