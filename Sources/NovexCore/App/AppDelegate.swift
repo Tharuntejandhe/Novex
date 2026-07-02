@@ -80,6 +80,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         debugShowPopoverIfRequested()
         debugDemoNotchIfRequested()
+
+        // Dev-only: run the headless agent bench against a FAKE inbox and write
+        // results to ~/novex_bench.txt (fake data, never touches real mail or UI).
+        if UserDefaults.standard.bool(forKey: "NOVEX_AGENT_BENCH"), #available(macOS 26.0, *) {
+            Task { @MainActor in await AgentBench.run() }
+        }
     }
 
     /// Demo (screenshots only): drop a notch card, or loop the fly-to-Novex dot so

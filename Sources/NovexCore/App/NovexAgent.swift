@@ -3,252 +3,114 @@ import Foundation
 import FoundationModels
 #endif
 
-/// What the agent decided to do. Pure (no model / no FoundationModels), so the
-/// caller (BriefingService, on the main actor) can execute it and it stays testable.
-enum AgentOutcome: Equatable {
-    /// Just talk back to the user.
-    case answer(String)
-    /// Draft a reply to a specific message (shown for the user to send - never auto-sent).
-    case draft(messageID: String, intent: String)
-    /// Mark messages as done / dismiss them (reversible).
-    case markDone(messageIDs: [String], senderNames: [String])
-}
-
-/// Agentic on-device chat.
-///
-/// A small tool-use (ReAct) loop over the plain on-device model. The model can:
-///   SEARCH: <keywords>       look things up in the inbox (numbered results)
-///   ANSWER: <reply>          talk to the user
-///   DRAFT: <#> | <intent>    draft a reply to search result <#> (user still sends it)
-///   DONE: <#>[, <#>]         mark result(s) as done / dismiss (reversible)
-/// It always sees a deterministic "what needs you" plate, so planning is grounded.
-///
-/// Actions are grounded on NUMBERED search results (the model must SEARCH first),
-/// so it can only act on real, identified emails. Drafting never sends; dismissing
-/// is reversible. Search is read-only and local. The model call is injected, so the
-/// whole loop is deterministically testable with a scripted mock.
-@available(macOS 26.0, *)
-struct NovexAgent {
-    let messages: [MailMessage]
-    let mine: Set<String>
-    /// Deterministic "what actually needs the user" summary (from the engine).
-    let plate: String
-
-    enum AgentError: Error { case unavailable }
-
-    /// Live entry point. Throws if the on-device model is unavailable so the caller
-    /// can fall back to the plain retrieval path.
-    func answer(_ question: String) async throws -> AgentOutcome {
-        #if canImport(FoundationModels)
-        guard SystemLanguageModel.default.availability == .available else { throw AgentError.unavailable }
-        let session = LanguageModelSession(instructions: Self.instructions(plate: plate))
-        return try await run(question: question) { prompt in
-            try await session.respond(to: prompt).content
-        }
-        #else
-        throw AgentError.unavailable
-        #endif
-    }
-
-    /// The tool-use loop, model-agnostic. `respond` maps a prompt to the model's
-    /// reply (live: a stateful LanguageModelSession; tests: a scripted mock).
-    func run(question: String, maxSteps: Int = 4,
-             respond: (String) async throws -> String) async rethrows -> AgentOutcome {
-        var prompt = Self.firstPrompt(question: question)
-        var lastHits: [MailMessage] = []   // the latest NUMBERED search results
-        for _ in 0..<maxSteps {
-            let out = try await respond(prompt)
-
-            if let query = Self.extractSearch(out) {
-                let found = InboxSearch.search(query: query, messages: messages, mine: mine)
-                lastHits = found.hits
-                prompt = Self.resultsPrompt(query: query, results: found.text)
-                continue
-            }
-            // Actions reference the numbered results; resolve against lastHits.
-            if let draft = Self.extractDraft(out) {
-                if draft.index >= 1, draft.index <= lastHits.count,
-                   let mid = lastHits[draft.index - 1].messageID {
-                    return .draft(messageID: mid, intent: draft.intent)
-                }
-                prompt = Self.recoverPrompt   // referenced an email it hasn't found
-                continue
-            }
-            if let idxs = Self.extractDone(out) {
-                let valid = idxs.filter { $0 >= 1 && $0 <= lastHits.count }
-                let mids = valid.compactMap { lastHits[$0 - 1].messageID }
-                if !mids.isEmpty {
-                    let names = valid.map { lastHits[$0 - 1].senderDisplay }
-                    return .markDone(messageIDs: mids, senderNames: names)
-                }
-                prompt = Self.recoverPrompt
-                continue
-            }
-            if let answer = Self.extractAnswer(out) { return .answer(answer) }
-            return .answer(out)   // model didn't follow the protocol; use its text
-        }
-        // Out of budget - force a final answer.
-        let final = try await respond("Answer the user now in 1-2 short sentences from what you found. Start with ANSWER:")
-        return .answer(Self.extractAnswer(final) ?? final)
-    }
-
-    // MARK: - Prompts
-
-    static func instructions(plate: String) -> String {
-        """
-        You are Novex, the user's warm, concise on-device email assistant.
-
-        You work in a loop. Reply in exactly ONE of these formats and nothing else:
-          SEARCH: <keywords>          look up emails (I reply with NUMBERED matches)
-          ANSWER: <1-2 sentences>     talk to the user
-          DRAFT: <#> | <what to say>  draft a reply to numbered email <#> (I show it; the USER sends it)
-          DONE: <#>                   mark numbered email <#> as done / dismiss it (you may list several: DONE: 1, 3)
-
-        Rules:
-        - For ANY request about their email, SEARCH first (use the key nouns). Results are numbered [1], [2], ... Only ever use a number that appeared in the LATEST search results.
-        - To answer a question: SEARCH, then ANSWER from the matches. If a search returns "No matching emails", ANSWER that you don't see anything about it. NEVER answer from unrelated mail or invent anything.
-        - To reply for the user ("reply to X that ..."): SEARCH for it, then DRAFT: <#> | <the point to make>. Drafting only PREPARES a reply for the user to review and send - it never sends on its own.
-        - To clear/dismiss ("mark X done", "clear the Y notifications"): SEARCH for it, then DONE: <#>. Dismissing is reversible.
-        - ANSWER in your own words, 1-2 sentences, like a friend who skimmed their inbox. No pasting email text, no bullet points, headers, greetings, or asterisks. Use the REAL sender names and subjects; never a name not in the data.
-        - A login/security code, a "password changed" notice, receipts, and newsletters are FYI - never say the user must act on those.
-
-        What actually needs the user right now, from a reliable check already done for you:
-        \(PromptSafety.fence(plate))
-        If they ask what needs them or what to do, ANSWER from that list; if it says nothing needs them, say so.
-
-        \(PromptSafety.securityClause)
-        """
-    }
-
-    static func firstPrompt(question: String) -> String {
-        """
-        The user (trusted) asks: \(question)
-
-        Reply with SEARCH:, ANSWER:, DRAFT:, or DONE: as the rules describe.
-        """
-    }
-
-    static func resultsPrompt(query: String, results: String) -> String {
-        """
-        Numbered search results for "\(query)":
-        \(PromptSafety.fence(results))
-
-        Now reply with SEARCH:, ANSWER:, DRAFT: <#> | ..., or DONE: <#>.
-        """
-    }
-
-    static let recoverPrompt = """
-    You referenced an email number that isn't in the latest results. SEARCH first with good keywords, then act on a number that appears. Reply with SEARCH: <keywords>.
-    """
-
-    // MARK: - Protocol parsing (pure, testable)
-
-    static func extractSearch(_ s: String) -> String? { directive("SEARCH:", in: s) }
-    static func extractAnswer(_ s: String) -> String? {
-        guard let r = s.range(of: "ANSWER:", options: .caseInsensitive) else { return nil }
-        let a = s[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-        return a.isEmpty ? nil : a
-    }
-
-    /// `DRAFT: <#> | <intent>` -> (index, intent). Intent optional.
-    static func extractDraft(_ s: String) -> (index: Int, intent: String)? {
-        guard let line = directive("DRAFT:", in: s), let idx = firstInt(line) else { return nil }
-        let intent: String
-        if let bar = line.firstIndex(of: "|") {
-            intent = String(line[line.index(after: bar)...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            intent = ""
-        }
-        return (idx, intent)
-    }
-
-    /// `DONE: 1, 3` -> [1, 3].
-    static func extractDone(_ s: String) -> [Int]? {
-        guard let line = directive("DONE:", in: s) else { return nil }
-        let nums = line.split { !$0.isNumber }.compactMap { Int($0) }
-        return nums.isEmpty ? nil : nums
-    }
-
-    /// The first non-empty line after a `TAG:` directive, or nil.
-    private static func directive(_ tag: String, in s: String) -> String? {
-        guard let r = s.range(of: tag, options: .caseInsensitive) else { return nil }
-        let after = s[r.upperBound...]
-        let line = after.split(whereSeparator: \.isNewline).first.map(String.init) ?? String(after)
-        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
-    }
-
-    private static func firstInt(_ s: String) -> Int? {
-        let digits = s.drop(while: { !$0.isNumber }).prefix(while: { $0.isNumber })
-        return Int(digits)
-    }
-}
-
-/// A clear action the user asked for in plain language. Detected deterministically
-/// (below) rather than hoping the small on-device model emits the right directive -
-/// the 3B model reliably WRITES a draft but often skips a "DRAFT: <#>" directive.
+/// A clear action the user asked for in plain language. Detected DETERMINISTICALLY
+/// (see ActionParser) - never by the small on-device model, which cannot be trusted
+/// to only act when asked (in testing it dismissed real mail in response to plain
+/// questions). The model reads and answers; code decides and acts.
 enum ActionIntent: Equatable {
     case draft(targetHint: String, intent: String)   // "reply to X saying Y"
     case dismiss(targetHint: String)                 // "clear the X notifications"
 }
 
 /// High-precision classifier for action requests. Returns nil for anything that
-/// isn't clearly an action, so ordinary questions still flow to the agentic Q&A.
-/// Pure + testable.
+/// isn't UNAMBIGUOUSLY an action (questions, chit-chat) so those flow to Q&A. Pure.
 enum ActionParser {
+    // A request that STARTS with one of these is a question, never an action.
+    private static let interrogatives: Set<String> = ["did","do","does","is","are","was","were",
+        "have","has","had","can't","cant","any","anything","what","whats","what's","when","where",
+        "who","whos","who's","why","how","which","whose","whom","should","will there"]
+    // Strip these lead-ins so "can you reply to X" reads as a command, not a question.
+    private static let politePrefixes = ["please ", "pls ", "hey novex ", "ok novex ", "novex ",
+        "hey ", "can you please ", "can you ", "could you please ", "could you ", "would you please ",
+        "would you ", "will you ", "i want you to ", "i'd like you to ", "i need you to ", "go ahead and "]
+    static let clutterWords: Set<String> = ["promotion","promotions","promo","promos","newsletter",
+        "newsletters","spam","junk","ad","ads","subscription","subscriptions","marketing"]
+
     static func classify(_ q: String) -> ActionIntent? {
-        let lower = q.lowercased().trimmingCharacters(in: .whitespaces)
-
-        // DRAFT: "reply to X saying Y", "respond to X", "write back to X", ...
-        let draftVerbs = ["draft a reply to ", "draft a response to ", "write a reply to ",
-                          "reply to ", "respond to ", "write back to ", "get back to "]
-        for v in draftVerbs {
-            guard let r = lower.range(of: v) else { continue }
-            let (target, intent) = splitTargetIntent(String(lower[r.upperBound...]))
-            let hint = cleanTarget(target)
-            if !hint.isEmpty { return .draft(targetHint: hint, intent: intent) }
+        var lower = q.lowercased().trimmingCharacters(in: .whitespaces)
+        var changed = true
+        while changed {
+            changed = false
+            for p in politePrefixes where lower.hasPrefix(p) {
+                lower = String(lower.dropFirst(p.count)).trimmingCharacters(in: .whitespaces)
+                changed = true; break
+            }
         }
+        // A genuine question is never an action ("did I forget to reply to anyone?").
+        let firstWord = lower.split(separator: " ").first.map(String.init) ?? ""
+        if interrogatives.contains(firstWord) { return nil }
 
-        // DISMISS: must START with a clearing verb AND refer to mail (high precision,
-        // so "clear up what the meeting is" is NOT read as a dismiss).
-        let dismissVerbs = ["mark ", "clear ", "dismiss ", "archive ", "get rid of ", "delete "]
-        for v in dismissVerbs where lower.hasPrefix(v) || lower.hasPrefix("please " + v) {
-            let mailish = ["email", "mail", "notification", "message", "done", "read",
-                           "inbox", "newsletter", "from ", "alert"].contains { lower.contains($0) }
-            guard mailish else { continue }
-            let start = lower.hasPrefix("please ") ? "please " + v : v
-            guard let r = lower.range(of: start) else { continue }
-            let hint = cleanTarget(dismissClean(String(lower[r.upperBound...])))
-            if !hint.isEmpty { return .dismiss(targetHint: hint) }
+        if let d = draftMatch(lower) { return .draft(targetHint: d.0, intent: d.1) }
+        if let hint = dismissMatch(lower) { return .dismiss(targetHint: hint) }
+        return nil
+    }
+
+    // MARK: draft
+
+    private static func draftMatch(_ lower: String) -> (String, String)? {
+        let verbs = ["draft a reply to ", "draft a response to ", "write back to ",
+                     "reply to ", "respond to ", "get back to "]
+        for v in verbs where lower.hasPrefix(v) {
+            let (t, i) = splitTargetIntent(String(lower.dropFirst(v.count)))
+            let hint = cleanTarget(t)
+            if !hint.isEmpty { return (hint, i) }
+        }
+        // "tell <person> ..." but NOT "tell me/us/what..." (those are info requests).
+        if lower.hasPrefix("tell ") {
+            let rest = String(lower.dropFirst(5))
+            let fw = rest.split(separator: " ").first.map(String.init) ?? ""
+            let queryish: Set<String> = ["me","us","myself","what","who","when","whether","if","how","why","where","them"]
+            if !queryish.contains(fw) {
+                let (t, i) = splitTargetIntent(rest)
+                let hint = cleanTarget(t)
+                if !hint.isEmpty { return (hint, i) }
+            }
+        }
+        // "let <person> know ..."
+        if lower.hasPrefix("let "), let kr = lower.range(of: " know") {
+            let target = cleanTarget(String(lower[lower.index(lower.startIndex, offsetBy: 4)..<kr.lowerBound]))
+            var intent = String(lower[kr.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if intent.hasPrefix("that ") { intent = String(intent.dropFirst(5)) }
+            if !target.isEmpty { return (target, intent) }
         }
         return nil
     }
 
-    /// Split "X saying Y" (and variants) into target X and intent Y.
+    /// Split "X saying/that Y" into target X and intent Y.
     static func splitTargetIntent(_ s: String) -> (target: String, intent: String) {
-        let delims = [" saying ", " to say ", " telling them ", " telling ",
-                      " that i ", " that we ", " that i'll ", ", say ", " and say ", ": "]
-        for d in delims {
+        // Delimiters that are CONSUMED (the word "saying"/"that" isn't part of the intent).
+        let cut = [" saying ", " to say ", " and say ", " that i'll ", " that i'm ", " that i ",
+                   " that we'll ", " that we ", " that ", " telling them ", " telling ", ": "]
+        for d in cut {
             if let r = s.range(of: d) {
-                let intent = String(s[r.upperBound...]).trimmingCharacters(in: .whitespaces)
-                // Keep the natural leading word for "that i / that we" splits.
-                let prefix = d.contains("that") ? String(d.dropFirst().dropLast()) + " " : ""
-                return (String(s[..<r.lowerBound]), prefix + intent)
+                return (String(s[..<r.lowerBound]),
+                        String(s[r.upperBound...]).trimmingCharacters(in: .whitespaces))
+            }
+        }
+        // Pronoun starts ("tell mom I'll be home"): the pronoun BEGINS the intent, so
+        // keep it ("i'll be home"), and everything before it is the target ("mom").
+        let keep = [" i'll ", " i'm ", " we'll ", " we're ", " i ", " we "]
+        for d in keep {
+            if let r = s.range(of: d) {
+                return (String(s[..<r.lowerBound]),
+                        String(s[r.lowerBound...]).trimmingCharacters(in: .whitespaces))
             }
         }
         return (s, "")
     }
 
-    /// Strip articles and trailing "email/message/notification(s)" so the remainder
-    /// is good search keywords.
-    static func cleanTarget(_ s: String) -> String {
-        var t = s.trimmingCharacters(in: .whitespaces)
-        for a in ["the ", "my ", "that ", "this ", "an ", "a "] where t.hasPrefix(a) { t = String(t.dropFirst(a.count)) }
-        for n in [" emails", " email", " messages", " message", " mail", " threads", " thread",
-                  " notifications", " notification", " alerts", " alert", " one", " ones"] where t.hasSuffix(n) {
-            t = String(t.dropLast(n.count))
+    // MARK: dismiss
+
+    private static func dismissMatch(_ lower: String) -> String? {
+        let verbs = ["mark ", "clear ", "dismiss ", "archive ", "get rid of ", "delete ", "remove "]
+        for v in verbs where lower.hasPrefix(v) {
+            let mailish = ["email","mail","notification","message","done","read","inbox","from ","alert"]
+                .contains { lower.contains($0) } || clutterWords.contains { lower.contains($0) }
+            guard mailish else { continue }
+            let hint = cleanTarget(dismissClean(String(lower.dropFirst(v.count))))
+            if !hint.isEmpty { return hint }
         }
-        return t.trimmingCharacters(in: .whitespaces)
+        return nil
     }
 
     static func dismissClean(_ s: String) -> String {
@@ -258,19 +120,166 @@ enum ActionParser {
         }
         return t.trimmingCharacters(in: .whitespaces)
     }
+
+    // MARK: shared
+
+    /// Strip articles / trailing mail-nouns and cut at " and " (multi-intent -> first
+    /// target) so the remainder is clean search keywords.
+    static func cleanTarget(_ s: String) -> String {
+        var t = s.trimmingCharacters(in: .whitespaces)
+        if let r = t.range(of: " and ") { t = String(t[..<r.lowerBound]) }
+        for a in ["the ", "my ", "that ", "this ", "an ", "a "] where t.hasPrefix(a) { t = String(t.dropFirst(a.count)) }
+        for n in [" emails", " email", " messages", " message", " mail", " threads", " thread",
+                  " notifications", " notification", " alerts", " alert", " one", " ones"] where t.hasSuffix(n) {
+            t = String(t.dropLast(n.count))
+        }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Whether a dismiss target means "the clutter" (promos/newsletters) rather than
+    /// a specific sender/topic.
+    static func isClutterTarget(_ hint: String) -> Bool {
+        hint.isEmpty || clutterWords.contains { hint.contains($0) }
+    }
+
+    /// Human psychology: people rarely ask plainly. "ugh so much spam" / "my inbox is
+    /// a mess" isn't a question to search - it's a nudge for help. Detect it so we can
+    /// offer the cleanup instead of literally searching for the word "spam".
+    static func isClutterComplaint(_ q: String) -> Bool {
+        let l = q.lowercased()
+        if let fw = l.split(separator: " ").first.map(String.init), interrogatives.contains(fw) { return false }
+        let phrases = ["so much spam", "so much junk", "so much mail", "so much clutter",
+                       "too much spam", "too much junk", "so many email", "too many email",
+                       "so many mail", "inbox is a mess", "messy inbox", "get so much",
+                       "getting so much", "overwhelmed", "hate all these", "sick of these",
+                       "clean up my inbox", "my inbox is full", "inbox is full", "drowning in"]
+        return phrases.contains { l.contains($0) }
+    }
 }
 
-/// Read-only inbox search shared by the agent (and directly unit-testable). Pure,
-/// no model and no FoundationModels dependency.
+/// Agentic on-device Q&A.
+///
+/// A small tool-use (ReAct) loop over the plain on-device model. The model can only
+/// SEARCH the inbox and ANSWER - it CANNOT take actions (a small model can't be
+/// trusted to act only when asked; in testing it dismissed real mail in reply to a
+/// plain question). All actions go through the deterministic ActionParser instead.
+/// It always sees a deterministic "what needs you" plate + inbox stats, so it never
+/// sells an FYI as a to-do or miscounts. The model call is injected, so the whole
+/// loop is deterministically testable with a scripted mock.
+@available(macOS 26.0, *)
+struct NovexAgent {
+    let messages: [MailMessage]
+    let mine: Set<String>
+    let plate: String
+
+    enum AgentError: Error { case unavailable }
+
+    func answer(_ question: String) async throws -> String {
+        #if canImport(FoundationModels)
+        guard SystemLanguageModel.default.availability == .available else { throw AgentError.unavailable }
+        let session = LanguageModelSession(instructions: Self.instructions(plate: plate, stats: statsLine))
+        return try await run(question: question) { prompt in
+            try await session.respond(to: prompt).content
+        }
+        #else
+        throw AgentError.unavailable
+        #endif
+    }
+
+    /// The Q&A loop, model-agnostic (live: a LanguageModelSession; tests: a mock).
+    /// Answer-only: never returns or performs an action.
+    func run(question: String, maxSteps: Int = 3,
+             respond: (String) async throws -> String) async rethrows -> String {
+        var prompt = Self.firstPrompt(question: question)
+        for _ in 0..<maxSteps {
+            let out = try await respond(prompt)
+            if let query = Self.extractSearch(out) {
+                let found = InboxSearch.search(query: query, messages: messages, mine: mine)
+                prompt = Self.resultsPrompt(query: query, results: found.text)
+                continue
+            }
+            if let answer = Self.extractAnswer(out) { return answer }
+            return out
+        }
+        let final = try await respond("Answer the user now in 1-2 short sentences from what you found. Start with ANSWER:")
+        return Self.extractAnswer(final) ?? final
+    }
+
+    var statsLine: String {
+        let unread = messages.filter { !$0.isRead && !$0.isFromSelf(mine) }.count
+        return "Inbox snapshot: \(unread) unread of \(messages.count) recent emails."
+    }
+
+    // MARK: - Prompts
+
+    static func instructions(plate: String, stats: String) -> String {
+        """
+        You are Novex, the user's warm, concise on-device email assistant. You help ONLY with their email.
+
+        To answer a question about their email, FIRST reply "SEARCH: <keywords>" (the key nouns from their question). I reply with the matching emails. Then reply "ANSWER: <your reply>". You may SEARCH again with different words if the first misses. If a search returns "No matching emails", ANSWER that you don't see anything about that in their recent mail. NEVER answer from unrelated mail and NEVER invent senders, subjects, amounts, or dates.
+
+        Reply in 1-2 SHORT sentences, in your own words, like a friend who skimmed their inbox. No pasting email text, no bullet points, headers, greetings, or asterisks. Use the REAL sender names and subjects only.
+
+        You can ONLY read and describe email. You CANNOT take actions here: NEVER say you sent, drafted, replied to, cleared, dismissed, archived, deleted, or scheduled anything - you can only tell them what is in the inbox. (When the user asks you to reply to or clear something, the app does that separately - you won't see it.)
+
+        If the user asks about ANYTHING that is not their email (weather, news, sports, general facts, math, code, trivia), reply "ANSWER:" and say you can only help with their email - do NOT answer the question or make anything up.
+
+        Here is a reliable, already-computed summary of what needs the user - each item tagged [bill to pay] / [needs a reply] / [action needed] / [to review]. Use it to answer questions about bills, replies owed, deadlines, or what to do:
+        \(PromptSafety.fence(plate))
+        \(stats)
+        If they ask what needs them and the summary says nothing needs them, say so plainly.
+
+        If they complain about spam, clutter, or too many emails, tell them they can say "clear the newsletters" or open the Cleanup tab.
+
+        \(PromptSafety.securityClause)
+        """
+    }
+
+    static func firstPrompt(question: String) -> String {
+        """
+        The user (trusted) asks: \(question)
+
+        Reply with SEARCH: <keywords> or ANSWER: <reply>.
+        """
+    }
+
+    static func resultsPrompt(query: String, results: String) -> String {
+        """
+        Search results for "\(query)":
+        \(PromptSafety.fence(results))
+
+        Now reply with SEARCH: <new keywords> or ANSWER: <reply>.
+        """
+    }
+
+    // MARK: - Parsing (pure, testable)
+
+    static func extractSearch(_ s: String) -> String? {
+        guard let r = s.range(of: "SEARCH:", options: .caseInsensitive) else { return nil }
+        let after = s[r.upperBound...]
+        let line = after.split(whereSeparator: \.isNewline).first.map(String.init) ?? String(after)
+        let q = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        return q.isEmpty ? nil : q
+    }
+
+    static func extractAnswer(_ s: String) -> String? {
+        guard let r = s.range(of: "ANSWER:", options: .caseInsensitive) else { return nil }
+        let a = s[r.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return a.isEmpty ? nil : a
+    }
+}
+
+/// Read-only inbox search shared by the agent + the deterministic action path.
+/// Pure, no model, no FoundationModels dependency.
 enum InboxSearch {
-    /// Rank the inbox for `query`, returning both the NUMBERED rendering for the
-    /// model and the ordered messages (so the agent can map a result number back to
-    /// a message for actions). Honest: if the query has real terms but nothing
-    /// matches (rank fell back to recent), returns "No matching emails." + [].
+    /// Rank the inbox for `query` (with light synonym expansion) and return both a
+    /// rendering for the model and the ordered messages. Honest: if the query has
+    /// real terms but nothing matches, returns "No matching emails." + [].
     static func search(query: String, messages: [MailMessage], mine: Set<String>, limit: Int = 10)
         -> (text: String, hits: [MailMessage]) {
-        let ranked = MailRetrieval.rank(question: query, messages: messages, limit: limit)
-        let terms = queryTerms(query)
+        let expanded = expand(query)
+        let ranked = MailRetrieval.rank(question: expanded, messages: messages, limit: limit)
+        let terms = queryTerms(expanded)
         let realMatch = terms.isEmpty || ranked.contains { m in
             let hay = (m.subject + " " + (m.snippet ?? "") + " " + m.senderDisplay).lowercased()
             return terms.contains { hay.contains($0) }
@@ -280,24 +289,38 @@ enum InboxSearch {
         let hits = ranked.sorted { $0.dateReceived > $1.dateReceived }
         let now = Date()
         let rel = RelativeDateTimeFormatter()
-        let text = hits.enumerated().map { i, m -> String in
+        let text = hits.map { m -> String in
             let when = rel.localizedString(for: m.dateReceived, relativeTo: now)
             let read = m.isRead ? "" : " UNREAD"
             let sender = PromptSafety.sanitize(m.senderDisplay, maxChars: 48)
             let subject = PromptSafety.sanitize(String(m.subject.prefix(90)), maxChars: 90)
             let snip = PromptSafety.sanitize(String((m.snippet ?? "").prefix(120)), maxChars: 120)
-            return "[\(i + 1)] (\(when))\(read)\(kind(of: m, mine: mine)) \(sender): \(subject)" + (snip.isEmpty ? "" : " - \(snip)")
+            return "- (\(when))\(read)\(kind(of: m, mine: mine)) \(sender): \(subject)" + (snip.isEmpty ? "" : " - \(snip)")
         }.joined(separator: "\n")
         return (text, hits)
     }
 
-    /// Text-only rendering (used by tests and any non-action caller).
     static func results(query: String, messages: [MailMessage], mine: Set<String>, limit: Int = 10) -> String {
         search(query: query, messages: messages, mine: mine, limit: limit).text
     }
 
-    /// The SAME classification the briefing uses, so the model knows a code /
-    /// receipt / newsletter is FYI, not a to-do.
+    /// Expand a few common intents so keyword ranking finds the real mail:
+    /// "bills/pay" also matches "invoice/payment/due"; clutter words match promos.
+    static func expand(_ q: String) -> String {
+        let l = q.lowercased()
+        var extra: [String] = []
+        if ["bill","bills","pay","paid","owe","owed","charge","charged","cost","subscription"].contains(where: l.contains) {
+            extra += ["invoice", "payment", "due", "receipt", "$"]
+        }
+        if ActionParser.clutterWords.contains(where: l.contains) {
+            extra += ["sale", "off", "deal", "unsubscribe"]
+        }
+        if ["meeting","meet","call","invite","schedule"].contains(where: l.contains) {
+            extra += ["calendar", "invitation", "zoom"]
+        }
+        return extra.isEmpty ? q : q + " " + extra.joined(separator: " ")
+    }
+
     static func kind(of m: MailMessage, mine: Set<String>) -> String {
         if m.isFromSelf(mine) { return " [your own note]" }
         if m.isEphemeralNotification { return " [FYI]" }

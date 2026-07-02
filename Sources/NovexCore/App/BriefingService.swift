@@ -137,13 +137,10 @@ final class BriefingService {
             }
         }
 
-        // Agentic path: let the on-device model SEARCH the inbox on demand (its own
-        // keywords, more than once), grounded by the deterministic "what needs you"
-        // plate, instead of answering from one fixed slice of context. Falls through
-        // to the proven retrieval path below if the model is unavailable or errors.
-        // Deterministic action fast-path: a clear "reply to X saying Y" or "clear the
-        // Z" request is handled directly (reliable) instead of hoping the small model
-        // emits the right directive. Plain questions fall through to the agent below.
+        // Deterministic action fast-path. A clear "reply to X saying Y" or "clear the
+        // Z" request is executed HERE, in code - never by the small model, which in
+        // testing dismissed real mail in reply to plain questions. Plain questions
+        // fall through to the agentic Q&A below.
         if #available(macOS 26.0, *),
            let client0 = llmClient as? FoundationModelsClient, client0.isAvailable,
            let action = ActionParser.classify(q) {
@@ -155,16 +152,21 @@ final class BriefingService {
                    let mid = target.messageID {
                     await performDraft(messageID: mid, intent: intent, from: pool, turnID: turnID); return
                 }
-                // No repliable target found - fall through to the agent / RAG.
+                setChatAnswer("I couldn't find an email from \"\(hint)\" to reply to - who do you mean?", turnID: turnID); return
             case .dismiss(let hint):
-                let terms = InboxSearch.queryTerms(hint)
-                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine0).hits.filter { m in
-                    guard !m.isFromSelf(mine0) else { return false }
-                    if terms.isEmpty { return true }
-                    let hay = (m.subject + " " + m.senderDisplay).lowercased()   // sender/subject only (strong match)
-                    return terms.contains { hay.contains($0) }
+                let targets: [MailMessage]
+                if ActionParser.isClutterTarget(hint) {
+                    // "clear the newsletters/promotions/spam" - dismiss the clutter.
+                    targets = Array(pool.filter { !$0.isFromSelf(mine0) && DeclutterService.isNewsletter($0) }.prefix(15))
+                } else {
+                    let terms = InboxSearch.queryTerms(hint)
+                    targets = Array(InboxSearch.search(query: hint, messages: pool, mine: mine0).hits.filter { m in
+                        guard !m.isFromSelf(mine0) else { return false }
+                        if terms.isEmpty { return true }
+                        let hay = (m.subject + " " + m.senderDisplay).lowercased()   // sender/subject only (strong match)
+                        return terms.contains { hay.contains($0) }
+                    }.prefix(12))
                 }
-                let targets = Array(hits.prefix(8))
                 if !targets.isEmpty {
                     await performMarkDone(messageIDs: targets.compactMap { $0.messageID },
                                           senderNames: targets.map { $0.senderDisplay }, turnID: turnID); return
@@ -173,23 +175,28 @@ final class BriefingService {
             }
         }
 
+        // Psychology: a clutter complaint ("ugh so much spam") is a nudge for help,
+        // not a question - offer the cleanup instead of searching for the word "spam".
+        if ActionParser.isClutterComplaint(q) {
+            let mine1 = OwnerIdentity.addresses
+            let n = pool.filter { !$0.isFromSelf(mine1) && DeclutterService.isNewsletter($0) }.count
+            setChatAnswer(n > 0
+                ? "You've got about \(n) newsletters and promos piling up. Say \"clear the newsletters\" and I'll clear them, or open the Cleanup tab."
+                : "Your inbox actually looks clean right now - nothing piling up.", turnID: turnID)
+            return
+        }
+
+        // Agentic Q&A: the model SEARCHes the inbox on demand (its own keywords, more
+        // than once), grounded by the deterministic plate + inbox stats. Answer-only -
+        // it can never act. Falls through to the proven retrieval path if unavailable.
         if #available(macOS 26.0, *),
            let client = llmClient as? FoundationModelsClient, client.isAvailable {
             let mineNow = OwnerIdentity.addresses
             let agent = NovexAgent(messages: pool, mine: mineNow,
                                    plate: Self.plateSummary(from: pool, mine: mineNow))
-            if let outcome = try? await agent.answer(q) {
-                switch outcome {
-                case .answer(let raw):
-                    if !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        setChatAnswer(Self.tidyAnswer(raw), turnID: turnID); return
-                    }
-                    // empty -> fall through to the retrieval path below
-                case .draft(let mid, let intent):
-                    await performDraft(messageID: mid, intent: intent, from: pool, turnID: turnID); return
-                case .markDone(let mids, let names):
-                    await performMarkDone(messageIDs: mids, senderNames: names, turnID: turnID); return
-                }
+            if let raw = try? await agent.answer(q),
+               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                setChatAnswer(Self.tidyAnswer(raw), turnID: turnID); return
             }
         }
 
