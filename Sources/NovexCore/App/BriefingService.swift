@@ -21,6 +21,15 @@ final class BriefingService {
         let id: UUID
         let question: String
         var answer: String?
+        /// The emails this answer was grounded in - shown as tappable "open in Mail"
+        /// citations so the user can verify and jump to the source.
+        var sources: [ChatSource] = []
+    }
+    /// A citation: an email the answer came from.
+    struct ChatSource: Identifiable, Equatable, Sendable {
+        let messageID: String
+        let sender: String
+        var id: String { messageID }
     }
     /// When the user taps a notch notification, the panel opens focused on that
     /// specific mail (shown as a card at the top of Inbox until dismissed).
@@ -37,6 +46,11 @@ final class BriefingService {
     /// True while the latest question is still being answered.
     var isAnswering: Bool { chat.last.map { $0.answer == nil } ?? false }
     func clearChat() { chat = []; chatDraft = nil }
+
+    /// The last action's targets, so "undo" can reverse it (dismiss/snooze are both
+    /// reversible). Reset when a new action runs.
+    private var lastDismissed: [String] = []
+    private var lastSnoozed: [String] = []
 
     /// Shared instance so the menu-bar label (count), the menu-bar panel, and
     /// any other surface all observe ONE service running ONE refresh loop —
@@ -137,41 +151,26 @@ final class BriefingService {
             }
         }
 
-        // Deterministic action fast-path. A clear "reply to X saying Y" or "clear the
-        // Z" request is executed HERE, in code - never by the small model, which in
-        // testing dismissed real mail in reply to plain questions. Plain questions
+        // Undo: reverse the last dismiss / snooze (both are reversible). A trust
+        // primitive - the user can always take back an action.
+        if ActionParser.isUndo(q), !lastDismissed.isEmpty || !lastSnoozed.isEmpty {
+            for id in lastDismissed { DismissStore.restore(id) }
+            for id in lastSnoozed { SnoozeStore.unsnooze(id) }
+            let n = lastDismissed.count + lastSnoozed.count
+            lastDismissed = []; lastSnoozed = []
+            setChatAnswer("Done - I brought \(n == 1 ? "it" : "those \(n)") back.", turnID: turnID)
+            await refresh(); return
+        }
+
+        // Deterministic action fast-path - may be SEVERAL actions ("reply to X and
+        // clear Y"). Executed HERE, in code, never by the small model (which in
+        // testing dismissed real mail in reply to plain questions). Plain questions
         // fall through to the agentic Q&A below.
         if #available(macOS 26.0, *),
-           let client0 = llmClient as? FoundationModelsClient, client0.isAvailable,
-           let action = ActionParser.classify(q) {
-            let mine0 = OwnerIdentity.addresses
-            switch action {
-            case .draft(let hint, let intent):
-                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine0).hits
-                if let target = hits.first(where: { $0.isReplyable && !$0.isFromSelf(mine0) }),
-                   let mid = target.messageID {
-                    await performDraft(messageID: mid, intent: intent, from: pool, turnID: turnID); return
-                }
-                setChatAnswer("I couldn't find an email from \"\(hint)\" to reply to - who do you mean?", turnID: turnID); return
-            case .dismiss(let hint):
-                let targets: [MailMessage]
-                if ActionParser.isClutterTarget(hint) {
-                    // "clear the newsletters/promotions/spam" - dismiss the clutter.
-                    targets = Array(pool.filter { !$0.isFromSelf(mine0) && DeclutterService.isNewsletter($0) }.prefix(15))
-                } else {
-                    let terms = InboxSearch.queryTerms(hint)
-                    targets = Array(InboxSearch.search(query: hint, messages: pool, mine: mine0).hits.filter { m in
-                        guard !m.isFromSelf(mine0) else { return false }
-                        if terms.isEmpty { return true }
-                        let hay = (m.subject + " " + m.senderDisplay).lowercased()   // sender/subject only (strong match)
-                        return terms.contains { hay.contains($0) }
-                    }.prefix(12))
-                }
-                if !targets.isEmpty {
-                    await performMarkDone(messageIDs: targets.compactMap { $0.messageID },
-                                          senderNames: targets.map { $0.senderDisplay }, turnID: turnID); return
-                }
-                setChatAnswer("I couldn't find anything matching that to clear.", turnID: turnID); return
+           let clientA = llmClient as? FoundationModelsClient, clientA.isAvailable {
+            let actions = ActionParser.classifyAll(q)
+            if !actions.isEmpty {
+                await performActions(actions, pool: pool, turnID: turnID); return
             }
         }
 
@@ -188,15 +187,17 @@ final class BriefingService {
 
         // Agentic Q&A: the model SEARCHes the inbox on demand (its own keywords, more
         // than once), grounded by the deterministic plate + inbox stats. Answer-only -
-        // it can never act. Falls through to the proven retrieval path if unavailable.
+        // it can never act. The emails it searched become tappable citations.
         if #available(macOS 26.0, *),
            let client = llmClient as? FoundationModelsClient, client.isAvailable {
             let mineNow = OwnerIdentity.addresses
             let agent = NovexAgent(messages: pool, mine: mineNow,
                                    plate: Self.plateSummary(from: pool, mine: mineNow))
-            if let raw = try? await agent.answer(q),
-               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                setChatAnswer(Self.tidyAnswer(raw), turnID: turnID); return
+            if let reply = try? await agent.answer(q),
+               !reply.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                setChatAnswer(Self.tidyAnswer(reply.text), turnID: turnID)
+                setChatSources(reply.sources, turnID: turnID)
+                return
             }
         }
 
@@ -328,46 +329,100 @@ final class BriefingService {
         if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = text }
     }
 
-    /// Agent action: draft a reply to a message the model identified. Never sends -
-    /// it prepares the draft in the existing Send/Edit card. Fetches the body first
-    /// so the draft is grounded, and refuses to draft to a bot or to yourself.
-    private func performDraft(messageID mid: String, intent: String, from pool: [MailMessage], turnID: UUID) async {
-        let base = pool.first { $0.messageID == mid } ?? lastMessagesSnapshot.first { $0.messageID == mid }
-        guard let target = base else {
-            setChatAnswer("I couldn't find that email to reply to.", turnID: turnID); return
+    /// Execute one or more classified actions IN CODE (never the model) and report
+    /// what happened in a single honest confirmation. Draft shows a Send/Edit card
+    /// (never sends); dismiss + snooze are reversible and tracked so "undo" works.
+    private func performActions(_ actions: [ActionIntent], pool: [MailMessage], turnID: UUID) async {
+        let mine = OwnerIdentity.addresses
+        var parts: [String] = []
+        var mutated = false
+        lastDismissed = []; lastSnoozed = []
+        for action in actions {
+            switch action {
+            case .draft(let hint, let intent):
+                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine).hits
+                if let t = hits.first(where: { $0.isReplyable && !$0.isFromSelf(mine) }), let mid = t.messageID {
+                    let withBody = await attachBodies([t]).first ?? t
+                    let draft = await draftReply(for: withBody, intent: intent.isEmpty ? nil : intent)
+                    chatDraft = PreparedReply(messageID: mid, draft: draft)
+                    parts.append("drafted a reply to \(PromptSafety.sanitize(t.senderDisplay, maxChars: 40))")
+                } else {
+                    parts.append("couldn't find an email from \"\(hint)\" to reply to")
+                }
+            case .dismiss(let hint):
+                let targets = dismissTargets(hint: hint, pool: pool, mine: mine)
+                if targets.isEmpty {
+                    parts.append("found nothing matching \"\(hint)\" to clear")
+                } else {
+                    for m in targets { if let id = m.messageID { DismissStore.dismiss(id) } }
+                    lastDismissed += targets.compactMap { $0.messageID }
+                    mutated = true
+                    let who = Self.senderList(targets.map { $0.senderDisplay })
+                    parts.append(targets.count == 1 ? "cleared the message from \(who)"
+                                                    : "cleared \(targets.count) messages (\(who))")
+                }
+            case .snooze(let hint, let preset):
+                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine).hits
+                if let t = hits.first(where: { !$0.isFromSelf(mine) }), let mid = t.messageID {
+                    SnoozeStore.snooze(messageID: mid, title: t.subject, until: preset.wakeDate(from: Date()))
+                    lastSnoozed.append(mid); mutated = true
+                    parts.append("I'll bring \(PromptSafety.sanitize(t.senderDisplay, maxChars: 40))'s email back \(preset.label.lowercased())")
+                } else {
+                    parts.append("couldn't find \"\(hint)\" to snooze")
+                }
+            }
         }
-        guard target.isReplyable, !target.isFromSelf(OwnerIdentity.addresses) else {
-            setChatAnswer("That one isn't something I can reply to (it looks automated).", turnID: turnID); return
-        }
-        let withBody = await attachBodies([target]).first ?? target
-        let draft = await draftReply(for: withBody, intent: intent.isEmpty ? nil : intent)
-        chatDraft = PreparedReply(messageID: mid, draft: draft)
-        let name = PromptSafety.sanitize(target.senderDisplay, maxChars: 40)
-        setChatAnswer("I've drafted a reply to \(name) - take a look below and send it when you're happy.", turnID: turnID)
+        setChatAnswer(Self.sentence(parts), turnID: turnID)
+        if mutated { await refresh() }
     }
 
-    /// Agent action: mark messages done / dismiss them. Reversible (DismissStore),
-    /// then refresh so they drop out of the briefing.
-    private func performMarkDone(messageIDs mids: [String], senderNames names: [String], turnID: UUID) async {
-        for mid in mids { DismissStore.dismiss(mid) }
-        let who = Self.humanList(names.map { PromptSafety.sanitize($0, maxChars: 40) })
-        let msg = mids.count == 1
-            ? "Done - I marked \(who.isEmpty ? "that email" : "the message from \(who)") as done."
-            : "Done - I marked \(mids.count) messages as done\(who.isEmpty ? "" : " (\(who))")."
-        setChatAnswer(msg, turnID: turnID)
-        await refresh()
+    /// The emails a "clear/dismiss" targets: the clutter for a generic word, else
+    /// strong sender/subject matches for a specific one.
+    private func dismissTargets(hint: String, pool: [MailMessage], mine: Set<String>) -> [MailMessage] {
+        if ActionParser.isClutterTarget(hint) {
+            return Array(pool.filter { !$0.isFromSelf(mine) && DeclutterService.isNewsletter($0) }.prefix(15))
+        }
+        let terms = InboxSearch.queryTerms(hint)
+        return Array(InboxSearch.search(query: hint, messages: pool, mine: mine).hits.filter { m in
+            guard !m.isFromSelf(mine) else { return false }
+            if terms.isEmpty { return true }
+            let hay = (m.subject + " " + m.senderDisplay).lowercased()
+            return terms.contains { hay.contains($0) }
+        }.prefix(12))
     }
 
-    /// Join names into readable prose, de-duplicated, order preserved: "A, B, and C".
-    nonisolated static func humanList(_ items: [String]) -> String {
+    /// Attach the emails an answer was grounded in as tappable citations (top 3).
+    private func setChatSources(_ sources: [MailMessage], turnID: UUID) {
+        let cites = sources.prefix(3).compactMap { m -> ChatSource? in
+            guard let id = m.messageID, !id.isEmpty else { return nil }
+            return ChatSource(messageID: id, sender: PromptSafety.sanitize(m.senderDisplay, maxChars: 32))
+        }
+        if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].sources = cites }
+    }
+
+    /// De-duplicated sender list: "Sarah, Mom, and Facebook".
+    nonisolated static func senderList(_ names: [String]) -> String {
         var seen = Set<String>(); var uniq: [String] = []
-        for i in items where !i.isEmpty && seen.insert(i).inserted { uniq.append(i) }
+        for n in names.map({ PromptSafety.sanitize($0, maxChars: 32) }) where !n.isEmpty && seen.insert(n).inserted { uniq.append(n) }
         switch uniq.count {
         case 0:  return ""
         case 1:  return uniq[0]
         case 2:  return "\(uniq[0]) and \(uniq[1])"
-        default: return uniq.dropLast().joined(separator: ", ") + ", and " + uniq.last!
+        default: return uniq.prefix(3).joined(separator: ", ") + (uniq.count > 3 ? ", and more" : "")
         }
+    }
+
+    /// Join action-result fragments into one capitalized sentence.
+    private static func sentence(_ parts: [String]) -> String {
+        let joined: String
+        switch parts.count {
+        case 0:  return "Done."
+        case 1:  joined = parts[0]
+        case 2:  joined = "\(parts[0]) and \(parts[1])"
+        default: joined = parts.dropLast().joined(separator: ", ") + ", and " + parts.last!
+        }
+        guard let f = joined.first else { return "Done." }
+        return f.uppercased() + joined.dropFirst() + "."
     }
 
     /// Clean up a model answer: strip the markdown/asterisk dumps the small model

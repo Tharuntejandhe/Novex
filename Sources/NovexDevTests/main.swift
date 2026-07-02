@@ -999,7 +999,10 @@ group("agentic chat (search tool / protocol parsing / plate)") {
         let agent = NovexAgent(messages: inbox, mine: [], plate: "Nothing needs the user right now.")
         let script = ScriptedModel(["SEARCH: interview", "ANSWER: Sarah asked to confirm Friday 2pm."])
         let out = runSync { await agent.run(question: "did sarah reply?") { script.reply($0) } }
-        check(out == "Sarah asked to confirm Friday 2pm.", "agent loop: SEARCH then ANSWER returns the answer text")
+        check(out.text == "Sarah asked to confirm Friday 2pm.", "agent loop: SEARCH then ANSWER returns the answer text")
+        // Citations: the answer carries the searched email as a source (jump-to-Mail).
+        check(out.sources.contains { $0.messageID == "<a1@x>" },
+              "agent loop: the answer is grounded with the searched email as a citation source")
         // "bills/pay" expands to invoice/payment/due so keyword search finds real bills.
         check(InboxSearch.expand("any bills to pay").contains("invoice"),
               "agent: 'bills to pay' expands to 'invoice' so search finds the bill (bench bug)")
@@ -1057,6 +1060,28 @@ group("agentic chat (search tool / protocol parsing / plate)") {
           "psych: 'is this spam?' is a question, not a complaint")
     check(!ActionParser.isClutterComplaint("what did sarah say"),
           "psych: a normal question is not a clutter complaint")
+
+    // Snooze action.
+    check(ActionParser.classify("remind me about the render invoice tomorrow") == .snooze(targetHint: "render invoice", preset: .tomorrow),
+          "action: 'remind me about X tomorrow' -> snooze(X, tomorrow)")
+    check(ActionParser.classify("snooze david until next week") == .snooze(targetHint: "david", preset: .nextWeek),
+          "action: 'snooze X until next week' -> snooze(X, nextWeek)")
+    check(ActionParser.classify("snooze the newsletter until the weekend") == .snooze(targetHint: "newsletter", preset: .thisWeekend),
+          "action: snooze parses the weekend preset")
+
+    // True multi-intent: two actions in one sentence, both executed.
+    let multi = ActionParser.classifyAll("reply to Sarah and clear the newsletters")
+    check(multi == [.draft(targetHint: "sarah", intent: ""), .dismiss(targetHint: "newsletters")],
+          "action: 'reply to Sarah AND clear the newsletters' -> BOTH actions (real multi-intent)")
+    // But an 'and' inside an intent doesn't split into two actions.
+    check(ActionParser.classifyAll("reply to sarah saying I'll be there and ready")
+          == [.draft(targetHint: "sarah", intent: "i'll be there and ready")],
+          "action: 'and' inside the reply text stays one draft, not two actions")
+
+    // Undo.
+    check(ActionParser.isUndo("undo") && ActionParser.isUndo("bring them back") && ActionParser.isUndo("oops undo that"),
+          "action: undo phrases are recognized")
+    check(!ActionParser.isUndo("what did undo the change"), "action: 'undo' mid-sentence in a question is not an undo command")
 }
 
 // MARK: - Summary

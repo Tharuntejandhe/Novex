@@ -10,6 +10,7 @@ import FoundationModels
 enum ActionIntent: Equatable {
     case draft(targetHint: String, intent: String)   // "reply to X saying Y"
     case dismiss(targetHint: String)                 // "clear the X notifications"
+    case snooze(targetHint: String, preset: SnoozePreset)   // "remind me about X tomorrow"
 }
 
 /// High-precision classifier for action requests. Returns nil for anything that
@@ -42,7 +43,39 @@ enum ActionParser {
 
         if let d = draftMatch(lower) { return .draft(targetHint: d.0, intent: d.1) }
         if let hint = dismissMatch(lower) { return .dismiss(targetHint: hint) }
+        if let s = snoozeMatch(lower) { return .snooze(targetHint: s.0, preset: s.1) }
         return nil
+    }
+
+    /// Classify a request that may contain MORE THAN ONE action ("reply to Sarah and
+    /// clear the newsletters"). Splits only where the second clause starts with an
+    /// action verb, so intents that merely contain "and" ("saying I'll be there and
+    /// ready") stay whole. Falls back to a single classify.
+    static func classifyAll(_ q: String) -> [ActionIntent] {
+        let lower = q.lowercased()
+        let connectors = [" and then ", " then ", " and also ", " also ", " and ", "; ", ", then ", ", "]
+        let actionStarts = ["reply ", "reply to ", "respond ", "write ", "tell ", "let ", "draft ",
+                            "clear ", "mark ", "dismiss ", "archive ", "delete ", "remove ",
+                            "snooze ", "remind ", "hide ", "get back ", "get rid "]
+        for c in connectors {
+            guard let r = lower.range(of: c) else { continue }
+            let secondLower = String(lower[r.upperBound...]).trimmingCharacters(in: .whitespaces)
+            guard actionStarts.contains(where: { secondLower.hasPrefix($0) }) else { continue }
+            let first = String(q[..<q.index(q.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: r.lowerBound))])
+            let second = String(q[q.index(q.startIndex, offsetBy: lower.distance(from: lower.startIndex, to: r.upperBound))...])
+            if let a = classify(first), let b = classify(second) { return [a, b] }
+            break
+        }
+        return classify(q).map { [$0] } ?? []
+    }
+
+    /// "undo" / "restore" / "bring them back" - reverse the last dismiss or snooze.
+    static func isUndo(_ q: String) -> Bool {
+        let l = q.lowercased().trimmingCharacters(in: .whitespaces)
+        let phrases = ["undo", "restore", "bring it back", "bring them back", "bring that back",
+                       "put it back", "put them back", "never mind", "nevermind", "oops",
+                       "un-dismiss", "undismiss", "unclear", "wait no"]
+        return phrases.contains { l == $0 || l.hasPrefix($0 + " ") || l.hasSuffix(" " + $0) }
     }
 
     // MARK: draft
@@ -121,6 +154,33 @@ enum ActionParser {
         return t.trimmingCharacters(in: .whitespaces)
     }
 
+    // MARK: snooze
+
+    private static func snoozeMatch(_ lower: String) -> (String, SnoozePreset)? {
+        let verbs = ["snooze ", "remind me about ", "remind me to look at ", "remind me of ", "hide "]
+        guard let v = verbs.first(where: { lower.hasPrefix($0) }) else { return nil }
+        var rest = String(lower.dropFirst(v.count))
+        let preset = presetFrom(rest)
+        for cut in [" until ", " till ", " til ", " again in ", " again ", " for "] {
+            if let r = rest.range(of: cut) { rest = String(rest[..<r.lowerBound]); break }
+        }
+        // Strip a trailing preset phrase left without a connector ("snooze sarah tomorrow").
+        for p in ["later today", "later", "tonight", "tomorrow", "this weekend", "the weekend",
+                  "weekend", "next week", "monday", "in an hour", "in a bit"] where rest.hasSuffix(" " + p) {
+            rest = String(rest.dropLast(p.count + 1)); break
+        }
+        let hint = cleanTarget(rest)
+        return hint.isEmpty ? nil : (hint, preset)
+    }
+
+    /// Map a time phrase to the nearest built-in snooze preset (defaults to tomorrow).
+    static func presetFrom(_ s: String) -> SnoozePreset {
+        if s.contains("weekend") { return .thisWeekend }
+        if s.contains("next week") || s.contains("monday") { return .nextWeek }
+        if s.contains("later") || s.contains("tonight") || s.contains("hour") || s.contains("in a bit") { return .laterToday }
+        return .tomorrow
+    }
+
     // MARK: shared
 
     /// Strip articles / trailing mail-nouns and cut at " and " (multi-intent -> first
@@ -174,7 +234,12 @@ struct NovexAgent {
 
     enum AgentError: Error { case unavailable }
 
-    func answer(_ question: String) async throws -> String {
+    /// An answer plus the emails it was grounded in (the last search's hits), so the
+    /// UI can offer "open the source" citations - the trust primitive the best
+    /// assistants (Superhuman, Shortwave) all have.
+    struct AgentReply: Equatable { let text: String; let sources: [MailMessage] }
+
+    func answer(_ question: String) async throws -> AgentReply {
         #if canImport(FoundationModels)
         guard SystemLanguageModel.default.availability == .available else { throw AgentError.unavailable }
         let session = LanguageModelSession(instructions: Self.instructions(plate: plate, stats: statsLine))
@@ -189,20 +254,22 @@ struct NovexAgent {
     /// The Q&A loop, model-agnostic (live: a LanguageModelSession; tests: a mock).
     /// Answer-only: never returns or performs an action.
     func run(question: String, maxSteps: Int = 3,
-             respond: (String) async throws -> String) async rethrows -> String {
+             respond: (String) async throws -> String) async rethrows -> AgentReply {
         var prompt = Self.firstPrompt(question: question)
+        var lastHits: [MailMessage] = []
         for _ in 0..<maxSteps {
             let out = try await respond(prompt)
             if let query = Self.extractSearch(out) {
                 let found = InboxSearch.search(query: query, messages: messages, mine: mine)
+                if !found.hits.isEmpty { lastHits = found.hits }   // remember for citations
                 prompt = Self.resultsPrompt(query: query, results: found.text)
                 continue
             }
-            if let answer = Self.extractAnswer(out) { return answer }
-            return out
+            if let answer = Self.extractAnswer(out) { return AgentReply(text: answer, sources: lastHits) }
+            return AgentReply(text: out, sources: lastHits)
         }
         let final = try await respond("Answer the user now in 1-2 short sentences from what you found. Start with ANSWER:")
-        return Self.extractAnswer(final) ?? final
+        return AgentReply(text: Self.extractAnswer(final) ?? final, sources: lastHits)
     }
 
     var statsLine: String {
@@ -220,9 +287,9 @@ struct NovexAgent {
 
         Reply in 1-2 SHORT sentences, in your own words, like a friend who skimmed their inbox. No pasting email text, no bullet points, headers, greetings, or asterisks. Use the REAL sender names and subjects only.
 
-        You can ONLY read and describe email. You CANNOT take actions here: NEVER say you sent, drafted, replied to, cleared, dismissed, archived, deleted, or scheduled anything - you can only tell them what is in the inbox. (When the user asks you to reply to or clear something, the app does that separately - you won't see it.)
+        You can ONLY read and describe email. You CANNOT take actions here: NEVER claim you sent, drafted, replied to, cleared, dismissed, archived, deleted, scheduled, confirmed, handled, or took care of anything - only describe what is in the inbox. (When the user asks you to reply to or clear something, the app does that separately - you won't see it.)
 
-        If the user asks about ANYTHING that is not their email (weather, news, sports, general facts, math, code, trivia), reply "ANSWER:" and say you can only help with their email - do NOT answer the question or make anything up.
+        If the user asks about anything that is not their email (weather, news, sports, facts, math, code, trivia), reply with exactly this and nothing else: ANSWER: I can only help with your email.
 
         Here is a reliable, already-computed summary of what needs the user - each item tagged [bill to pay] / [needs a reply] / [action needed] / [to review]. Use it to answer questions about bills, replies owed, deadlines, or what to do:
         \(PromptSafety.fence(plate))

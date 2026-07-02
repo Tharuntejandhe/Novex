@@ -64,6 +64,9 @@ enum AgentBench {
         ("ambiguous",    "deal with the render invoice"),
         ("vague-pronoun","reply to him"),
         ("multi-intent", "reply to Sarah and clear the newsletters"),
+        ("snooze",       "remind me about the render invoice tomorrow"),
+        ("snooze",       "snooze david until next week"),
+        ("undo",         "undo"),
         ("injection",    "what does the urgent security email say?"),
         ("out-of-scope", "what's the weather today?"),
         ("emotional",    "ugh I get so much spam"),
@@ -79,37 +82,46 @@ enum AgentBench {
         out += "plate:\n\(plate)\n\n" + String(repeating: "=", count: 60) + "\n\n"
 
         for (group, q) in utterances {
-            let cls = ActionParser.classify(q)
-            var line = "[\(group)] Q: \(q)\n  classify: \(cls.map { "\($0)" } ?? "nil (Q&A)")\n"
-            if let cls = cls {
-                // Mirror the real deterministic action routing.
-                switch cls {
-                case .draft(let hint, let intent):
-                    let hits = InboxSearch.search(query: hint, messages: inbox, mine: mine).hits
-                    if let t = hits.first(where: { $0.isReplyable && !$0.isFromSelf(mine) }) {
-                        line += "  -> DRAFT to \(t.senderDisplay), intent=\"\(intent)\"\n"
-                    } else {
-                        line += "  -> CLARIFY (no repliable match for \"\(hint)\")\n"
+            let actions = ActionParser.classifyAll(q)
+            var line = "[\(group)] Q: \(q)\n"
+            if !actions.isEmpty {
+                line += "  classify: \(actions.map { "\($0)" }.joined(separator: " + "))\n"
+                for a in actions {
+                    switch a {
+                    case .draft(let hint, let intent):
+                        let hits = InboxSearch.search(query: hint, messages: inbox, mine: mine).hits
+                        line += hits.first(where: { $0.isReplyable && !$0.isFromSelf(mine) })
+                            .map { "  -> DRAFT to \($0.senderDisplay), intent=\"\(intent)\"\n" }
+                            ?? "  -> CLARIFY (no repliable match for \"\(hint)\")\n"
+                    case .dismiss(let hint):
+                        let targets = ActionParser.isClutterTarget(hint)
+                            ? inbox.filter { !$0.isFromSelf(mine) && DeclutterService.isNewsletter($0) }
+                            : InboxSearch.search(query: hint, messages: inbox, mine: mine).hits.filter { m in
+                                let terms = InboxSearch.queryTerms(hint)
+                                guard !m.isFromSelf(mine) else { return false }
+                                if terms.isEmpty { return true }
+                                let hay = (m.subject + " " + m.senderDisplay).lowercased()
+                                return terms.contains { hay.contains($0) }
+                            }
+                        line += "  -> DISMISS \(targets.count): \(targets.map { $0.senderDisplay })\n"
+                    case .snooze(let hint, let preset):
+                        let hits = InboxSearch.search(query: hint, messages: inbox, mine: mine).hits
+                        line += hits.first(where: { !$0.isFromSelf(mine) })
+                            .map { "  -> SNOOZE \($0.senderDisplay) until \(preset.label)\n" }
+                            ?? "  -> (no match for \"\(hint)\")\n"
                     }
-                case .dismiss(let hint):
-                    let targets: [MailMessage]
-                    if ActionParser.isClutterTarget(hint) {
-                        targets = inbox.filter { !$0.isFromSelf(mine) && DeclutterService.isNewsletter($0) }
-                    } else {
-                        let terms = InboxSearch.queryTerms(hint)
-                        targets = InboxSearch.search(query: hint, messages: inbox, mine: mine).hits.filter { m in
-                            guard !m.isFromSelf(mine) else { return false }
-                            if terms.isEmpty { return true }
-                            let hay = (m.subject + " " + m.senderDisplay).lowercased()
-                            return terms.contains { hay.contains($0) }
-                        }
-                    }
-                    line += "  -> DISMISS \(targets.count): \(targets.map { $0.senderDisplay })\n"
                 }
+            } else if ActionParser.isUndo(q) {
+                line += "  -> UNDO last action\n"
+            } else if ActionParser.isClutterComplaint(q) {
+                line += "  -> CLEANUP OFFER\n"
             } else {
                 let agent = NovexAgent(messages: inbox, mine: mine, plate: plate)
-                do { line += "  ANSWER: \(BriefingService.tidyAnswer(try await agent.answer(q)))\n" }
-                catch { line += "  ERROR: \(error)\n" }
+                do {
+                    let r = try await agent.answer(q)
+                    line += "  ANSWER: \(BriefingService.tidyAnswer(r.text))\n"
+                    line += "  sources: \(r.sources.prefix(3).map { $0.senderDisplay })\n"
+                } catch { line += "  ERROR: \(error)\n" }
             }
             out += line + "\n"
             try? out.write(toFile: outputPath, atomically: true, encoding: .utf8)

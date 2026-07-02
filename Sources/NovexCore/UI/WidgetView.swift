@@ -386,12 +386,34 @@ struct WidgetView: View {
             Image(systemName: "sparkle").font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.cyan.opacity(0.8)).padding(.top, 3)
             if let answer = turn.answer {
-                TypingText(text: answer)
+                VStack(alignment: .leading, spacing: 6) {
+                    TypingText(text: answer)
+                    if !turn.sources.isEmpty { sourceChips(turn.sources) }
+                }
             } else {
                 TypingDots().padding(.top, 4)
             }
         }
         .padding(.trailing, 24)
+    }
+
+    /// Tappable "open in Mail" citations under an answer — the source emails it came
+    /// from, so the user can verify and jump straight to them.
+    @ViewBuilder
+    private func sourceChips(_ sources: [BriefingService.ChatSource]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(sources) { s in
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.up.forward.app").font(.system(size: 9))
+                    Text(s.sender).font(.system(size: 10, weight: .medium)).lineLimit(1)
+                }
+                .foregroundStyle(.cyan.opacity(0.85))
+                .padding(.horizontal, 7).padding(.vertical, 3)
+                .background(Capsule().fill(Color.cyan.opacity(0.12)))
+                .appKitTap { if let url = mailURLFor(s.messageID) { openInMail(url) } }
+            }
+        }
+        .padding(.top, 1)
     }
 
     private func analyzingCard(title: String, subtitle: String) -> some View {
