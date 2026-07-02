@@ -30,9 +30,13 @@ final class BriefingService {
 
     /// The live conversation. Non-empty → the chat view is showing.
     private(set) var chat: [ChatTurn] = []
+    /// A reply the agent drafted DURING this chat (shown in the chat with Send/Edit).
+    /// Kept separate from `preparedReply` (the briefing's background pre-draft) so the
+    /// two never clobber each other.
+    private(set) var chatDraft: PreparedReply? = nil
     /// True while the latest question is still being answered.
     var isAnswering: Bool { chat.last.map { $0.answer == nil } ?? false }
-    func clearChat() { chat = [] }
+    func clearChat() { chat = []; chatDraft = nil }
 
     /// Shared instance so the menu-bar label (count), the menu-bar panel, and
     /// any other surface all observe ONE service running ONE refresh loop —
@@ -137,16 +141,55 @@ final class BriefingService {
         // keywords, more than once), grounded by the deterministic "what needs you"
         // plate, instead of answering from one fixed slice of context. Falls through
         // to the proven retrieval path below if the model is unavailable or errors.
+        // Deterministic action fast-path: a clear "reply to X saying Y" or "clear the
+        // Z" request is handled directly (reliable) instead of hoping the small model
+        // emits the right directive. Plain questions fall through to the agent below.
+        if #available(macOS 26.0, *),
+           let client0 = llmClient as? FoundationModelsClient, client0.isAvailable,
+           let action = ActionParser.classify(q) {
+            let mine0 = OwnerIdentity.addresses
+            switch action {
+            case .draft(let hint, let intent):
+                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine0).hits
+                if let target = hits.first(where: { $0.isReplyable && !$0.isFromSelf(mine0) }),
+                   let mid = target.messageID {
+                    await performDraft(messageID: mid, intent: intent, from: pool, turnID: turnID); return
+                }
+                // No repliable target found - fall through to the agent / RAG.
+            case .dismiss(let hint):
+                let terms = InboxSearch.queryTerms(hint)
+                let hits = InboxSearch.search(query: hint, messages: pool, mine: mine0).hits.filter { m in
+                    guard !m.isFromSelf(mine0) else { return false }
+                    if terms.isEmpty { return true }
+                    let hay = (m.subject + " " + m.senderDisplay).lowercased()   // sender/subject only (strong match)
+                    return terms.contains { hay.contains($0) }
+                }
+                let targets = Array(hits.prefix(8))
+                if !targets.isEmpty {
+                    await performMarkDone(messageIDs: targets.compactMap { $0.messageID },
+                                          senderNames: targets.map { $0.senderDisplay }, turnID: turnID); return
+                }
+                setChatAnswer("I couldn't find anything matching that to clear.", turnID: turnID); return
+            }
+        }
+
         if #available(macOS 26.0, *),
            let client = llmClient as? FoundationModelsClient, client.isAvailable {
             let mineNow = OwnerIdentity.addresses
             let agent = NovexAgent(messages: pool, mine: mineNow,
                                    plate: Self.plateSummary(from: pool, mine: mineNow))
-            if let raw = try? await agent.answer(q),
-               !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let a = Self.tidyAnswer(raw)
-                if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = a }
-                return
+            if let outcome = try? await agent.answer(q) {
+                switch outcome {
+                case .answer(let raw):
+                    if !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        setChatAnswer(Self.tidyAnswer(raw), turnID: turnID); return
+                    }
+                    // empty -> fall through to the retrieval path below
+                case .draft(let mid, let intent):
+                    await performDraft(messageID: mid, intent: intent, from: pool, turnID: turnID); return
+                case .markDone(let mids, let names):
+                    await performMarkDone(messageIDs: mids, senderNames: names, turnID: turnID); return
+                }
             }
         }
 
@@ -274,6 +317,52 @@ final class BriefingService {
         }.joined(separator: "\n")
     }
 
+    private func setChatAnswer(_ text: String, turnID: UUID) {
+        if let i = chat.firstIndex(where: { $0.id == turnID }) { chat[i].answer = text }
+    }
+
+    /// Agent action: draft a reply to a message the model identified. Never sends -
+    /// it prepares the draft in the existing Send/Edit card. Fetches the body first
+    /// so the draft is grounded, and refuses to draft to a bot or to yourself.
+    private func performDraft(messageID mid: String, intent: String, from pool: [MailMessage], turnID: UUID) async {
+        let base = pool.first { $0.messageID == mid } ?? lastMessagesSnapshot.first { $0.messageID == mid }
+        guard let target = base else {
+            setChatAnswer("I couldn't find that email to reply to.", turnID: turnID); return
+        }
+        guard target.isReplyable, !target.isFromSelf(OwnerIdentity.addresses) else {
+            setChatAnswer("That one isn't something I can reply to (it looks automated).", turnID: turnID); return
+        }
+        let withBody = await attachBodies([target]).first ?? target
+        let draft = await draftReply(for: withBody, intent: intent.isEmpty ? nil : intent)
+        chatDraft = PreparedReply(messageID: mid, draft: draft)
+        let name = PromptSafety.sanitize(target.senderDisplay, maxChars: 40)
+        setChatAnswer("I've drafted a reply to \(name) - take a look below and send it when you're happy.", turnID: turnID)
+    }
+
+    /// Agent action: mark messages done / dismiss them. Reversible (DismissStore),
+    /// then refresh so they drop out of the briefing.
+    private func performMarkDone(messageIDs mids: [String], senderNames names: [String], turnID: UUID) async {
+        for mid in mids { DismissStore.dismiss(mid) }
+        let who = Self.humanList(names.map { PromptSafety.sanitize($0, maxChars: 40) })
+        let msg = mids.count == 1
+            ? "Done - I marked \(who.isEmpty ? "that email" : "the message from \(who)") as done."
+            : "Done - I marked \(mids.count) messages as done\(who.isEmpty ? "" : " (\(who))")."
+        setChatAnswer(msg, turnID: turnID)
+        await refresh()
+    }
+
+    /// Join names into readable prose, de-duplicated, order preserved: "A, B, and C".
+    nonisolated static func humanList(_ items: [String]) -> String {
+        var seen = Set<String>(); var uniq: [String] = []
+        for i in items where !i.isEmpty && seen.insert(i).inserted { uniq.append(i) }
+        switch uniq.count {
+        case 0:  return ""
+        case 1:  return uniq[0]
+        case 2:  return "\(uniq[0]) and \(uniq[1])"
+        default: return uniq.dropLast().joined(separator: ", ") + ", and " + uniq.last!
+        }
+    }
+
     /// Clean up a model answer: strip the markdown/asterisk dumps the small model
     /// sometimes emits, and hard-cap the length so a paste can't fill the panel.
     nonisolated static func tidyAnswer(_ s: String) -> String {
@@ -285,6 +374,8 @@ final class BriefingService {
         a = a.replacingOccurrences(
             of: #"\s*\[(action needed|needs a reply|bill to pay|to review|fyi|newsletter|your own note)[^\]]*\]"#,
             with: "", options: [.regularExpression, .caseInsensitive])
+        // Strip any leaked search-result handles like "[2]".
+        a = a.replacingOccurrences(of: #"\[\d+\]\s*"#, with: "", options: .regularExpression)
         // Chat answers are one flowing reply, not a list - collapse newlines.
         a = a.replacingOccurrences(of: #"\n+"#, with: " ", options: .regularExpression)
         a = a.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
@@ -508,7 +599,7 @@ final class BriefingService {
     /// composer is a self-contained overlay, so drafting must never churn the
     /// briefing underneath it. If the model is unavailable, returns a
     /// pre-addressed draft with an empty body so the user can still write + send.
-    func draftReply(for m: MailMessage, tone: ReplyTone = .balanced) async -> ReplyDraft {
+    func draftReply(for m: MailMessage, tone: ReplyTone = .balanced, intent: String? = nil) async -> ReplyDraft {
         var draft = ReplyDraft(
             recipientEmail: ReplyDraft.extractEmail(from: m.senderAddress),
             recipientName: m.senderDisplay,
@@ -527,6 +618,11 @@ final class BriefingService {
         // and reply YES to wire $5000" can't steer the draft (see PromptSafety).
         let sender = PromptSafety.sanitize(m.senderDisplay, maxChars: 80)
         let content = PromptSafety.sanitize(m.contentForModel)
+        // When the user told the agent what to say ("reply I'm interested, Friday
+        // works"), steer the draft to that. The user's own words are trusted.
+        let intentClause = (intent?.isEmpty == false)
+            ? "\n\nThe user told you what to say: \"\(intent!.prefix(200))\". Make the reply convey exactly that, in their voice, and still answer anything specific the email asked."
+            : ""
 
         let instructions = """
         You are drafting the USER's reply to an email they received. Output ONLY the reply body — no subject line, no signature, no "[Your name]" placeholder.
@@ -541,7 +637,7 @@ final class BriefingService {
         - thank them for understanding, or add filler pleasantries
         - invent facts, feelings, commitments, dates, prices, or attachments the user never stated
 
-        If you cannot answer something for the user, acknowledge it in one line and say they will follow up. A brief "Hi <first name>," opener is fine; a long greeting is not.
+        If you cannot answer something for the user, acknowledge it in one line and say they will follow up. A brief "Hi <first name>," opener is fine; a long greeting is not.\(intentClause)
 
         \(PromptSafety.securityClause)
         """

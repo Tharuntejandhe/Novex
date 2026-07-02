@@ -357,6 +357,10 @@ struct WidgetView: View {
                     ForEach(service.chat) { turn in
                         chatTurn(turn)
                     }
+                    // A reply the agent drafted in this chat - Send/Edit inline.
+                    if let pr = service.chatDraft {
+                        preparedDraftCard(pr).padding(.leading, 20)
+                    }
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
